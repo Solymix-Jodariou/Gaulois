@@ -168,6 +168,15 @@ async def init_db():
             )
             """
         )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS leaderboard_message (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            )
+            """
+        )
         # Migrations (Postgres)
         columns = await conn.fetch(
             "SELECT column_name FROM information_schema.columns WHERE table_name='backfill_state'"
@@ -377,6 +386,163 @@ async def load_leaderboard():
     return players, last_updated
 
 
+async def get_leaderboard_message(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM leaderboard_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_leaderboard_message(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO leaderboard_message (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_leaderboard_message(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM leaderboard_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def build_leaderboard_embed(guild):
+    players, last_updated = await load_leaderboard()
+    if not players:
+        return None
+
+    embed = discord.Embed(
+        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 100",
+        color=discord.Color.orange(),
+    )
+
+    top = players[:100]
+    total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
+    total_losses = sum(p["losses_ffa"] + p["losses_team"] for p in top)
+    total_players = len(top)
+
+    embed.description = (
+        f"**Joueurs:** {total_players}  |  "
+        f"**Wins:** {total_wins}  |  "
+        f"**Losses:** {total_losses}  |  "
+        f"**Min games:** {MIN_GAMES}  |  "
+        f"**Score:** ratio*{SCORE_RATIO_WEIGHT} + games*{SCORE_GAMES_WEIGHT}"
+    )
+    if guild and guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    medals = ["🥇", "🥈", "🥉"]
+    for idx, p in enumerate(top[:3]):
+        ratio = f"{p['ratio']:.2f}"
+        score = f"{p['score']:.1f}"
+        total_games = p["total_games"]
+        embed.add_field(
+            name=f"{medals[idx]} {p['display_name']}",
+            value=(
+                f"Score: **{score}** (ratio {ratio})\n"
+                f"TEAM: `{p['wins_team']}W / {p['losses_team']}L`\n"
+                f"GAMES: `{total_games}`"
+            ),
+            inline=False,
+        )
+
+    name_width = 14
+
+    def truncate_name(name: str) -> str:
+        if len(name) <= name_width:
+            return name
+        return name[: name_width - 3] + "..."
+
+    truncated_counts = {}
+    for p in top[3:]:
+        t = truncate_name(p["display_name"])
+        truncated_counts[t] = truncated_counts.get(t, 0) + 1
+
+    def format_table_name(player):
+        display = player["display_name"]
+        name = truncate_name(display)
+        if truncated_counts.get(name, 0) > 1:
+            suffix = player["username"][-3:]
+            base = display[: name_width - 4] if len(display) >= name_width - 3 else display
+            name = base[: name_width - 4] + "+" + suffix
+        return name
+
+    def format_line(rank, player):
+        username = format_table_name(player)
+        score = f"{player['score']:.1f}"
+        team = f"{player['wins_team']}W/{player['losses_team']}L"
+        games = f"{player['total_games']}"
+        return f"{rank:<3} {username:<{name_width}} {score:>5}  {team:>7}  {games:>3}"
+
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'TEAM':>7} {'G':>3}"
+    sep = "-" * (name_width + 22)
+
+    col1 = [header, sep]
+    col2 = [header, sep]
+    col3 = [header, sep]
+    col4 = [header, sep]
+    col5 = [header, sep]
+
+    for i, p in enumerate(top[3:], 4):
+        if i <= 23:
+            col1.append(format_line(i, p))
+        elif i <= 43:
+            col2.append(format_line(i, p))
+        elif i <= 63:
+            col3.append(format_line(i, p))
+        elif i <= 83:
+            col4.append(format_line(i, p))
+        else:
+            col5.append(format_line(i, p))
+
+    if len(col1) > 2:
+        embed.add_field(name="Top 4-23", value="```\n" + "\n".join(col1) + "\n```", inline=False)
+    if len(col2) > 2:
+        embed.add_field(name="Top 24-43", value="```\n" + "\n".join(col2) + "\n```", inline=False)
+    if len(col3) > 2:
+        embed.add_field(name="Top 44-63", value="```\n" + "\n".join(col3) + "\n```", inline=False)
+    if len(col4) > 2:
+        embed.add_field(name="Top 64-83", value="```\n" + "\n".join(col4) + "\n```", inline=False)
+    if len(col5) > 2:
+        embed.add_field(name="Top 84-100", value="```\n" + "\n".join(col5) + "\n```", inline=False)
+
+    if last_updated:
+        embed.set_footer(text=f"Mis à jour le {last_updated}")
+
+    return embed
+
+
+async def update_leaderboard_message():
+    if not bot.guilds:
+        return
+    for guild in bot.guilds:
+        record = await get_leaderboard_message(guild.id)
+        if not record:
+            continue
+        channel_id = record["channel_id"]
+        message_id = record["message_id"]
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            embed = await build_leaderboard_embed(guild)
+            if embed:
+                await message.edit(embed=embed)
+        except Exception:
+            await clear_leaderboard_message(guild.id)
+
+
 async def get_progress_stats():
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -542,6 +708,7 @@ async def live_loop():
             start_dt = end_dt - timedelta(hours=RANGE_HOURS)
             await refresh_from_range(start_dt, end_dt)
             print("Live refresh done")
+            await update_leaderboard_message()
         except Exception as exc:
             print(f"Live refresh failed: {exc}")
         await asyncio.sleep(REFRESH_MINUTES * 60)
@@ -569,114 +736,29 @@ async def on_ready():
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
 async def setleaderboard(interaction: discord.Interaction):
-    players, last_updated = await load_leaderboard()
-    if not players:
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+
+    record = await get_leaderboard_message(interaction.guild.id)
+    if record:
+        await interaction.response.send_message(
+            "Un leaderboard est déjà actif sur ce serveur. Utilise /removeleaderboard.",
+            ephemeral=True,
+        )
+        return
+
+    embed = await build_leaderboard_embed(interaction.guild)
+    if not embed:
         await interaction.response.send_message(
             f"No data for {CLAN_DISPLAY}. Wait for refresh.",
             ephemeral=True,
         )
         return
-    
-    embed = discord.Embed(
-        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 100",
-        color=discord.Color.orange(),
-    )
-
-    top = players[:100]
-    total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
-    total_losses = sum(p["losses_ffa"] + p["losses_team"] for p in top)
-    total_players = len(top)
-
-    embed.description = (
-        f"**Joueurs:** {total_players}  |  "
-        f"**Wins:** {total_wins}  |  "
-        f"**Losses:** {total_losses}  |  "
-        f"**Min games:** {MIN_GAMES}  |  "
-        f"**Score:** ratio*{SCORE_RATIO_WEIGHT} + games*{SCORE_GAMES_WEIGHT}"
-    )
-    if interaction.guild and interaction.guild.icon:
-        embed.set_thumbnail(url=interaction.guild.icon.url)
-
-    medals = ["🥇", "🥈", "🥉"]
-    for idx, p in enumerate(top[:3]):
-        ratio = f"{p['ratio']:.2f}"
-        score = f"{p['score']:.1f}"
-        total_games = p["total_games"]
-        embed.add_field(
-            name=f"{medals[idx]} {p['display_name']}",
-            value=(
-                f"Score: **{score}** (ratio {ratio})\n"
-                f"TEAM: `{p['wins_team']}W / {p['losses_team']}L`\n"
-                f"GAMES: `{total_games}`"
-            ),
-            inline=False,
-        )
-
-    name_width = 14
-
-    def truncate_name(name: str) -> str:
-        if len(name) <= name_width:
-            return name
-        return name[: name_width - 3] + "..."
-
-    # Precompute counts of truncated names to disambiguate duplicates
-    truncated_counts = {}
-    for p in top[3:]:
-        t = truncate_name(p["display_name"])
-        truncated_counts[t] = truncated_counts.get(t, 0) + 1
-
-    def format_table_name(player):
-        display = player["display_name"]
-        name = truncate_name(display)
-        if truncated_counts.get(name, 0) > 1:
-            suffix = player["username"][-3:]
-            base = display[: name_width - 4] if len(display) >= name_width - 3 else display
-            name = base[: name_width - 4] + "+" + suffix
-        return name
-
-    def format_line(rank, player):
-        username = format_table_name(player)
-        score = f"{player['score']:.1f}"
-        team = f"{player['wins_team']}W/{player['losses_team']}L"
-        games = f"{player['total_games']}"
-        return f"{rank:<3} {username:<{name_width}} {score:>5}  {team:>7}  {games:>3}"
-
-    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'TEAM':>7} {'G':>3}"
-    sep = "-" * (name_width + 22)
-
-    col1 = [header, sep]
-    col2 = [header, sep]
-    col3 = [header, sep]
-    col4 = [header, sep]
-    col5 = [header, sep]
-
-    for i, p in enumerate(top[3:], 4):
-        if i <= 23:
-            col1.append(format_line(i, p))
-        elif i <= 43:
-            col2.append(format_line(i, p))
-        elif i <= 63:
-            col3.append(format_line(i, p))
-        elif i <= 83:
-            col4.append(format_line(i, p))
-        else:
-            col5.append(format_line(i, p))
-
-    if len(col1) > 2:
-        embed.add_field(name="Top 4-23", value="```\n" + "\n".join(col1) + "\n```", inline=False)
-    if len(col2) > 2:
-        embed.add_field(name="Top 24-43", value="```\n" + "\n".join(col2) + "\n```", inline=False)
-    if len(col3) > 2:
-        embed.add_field(name="Top 44-63", value="```\n" + "\n".join(col3) + "\n```", inline=False)
-    if len(col4) > 2:
-        embed.add_field(name="Top 64-83", value="```\n" + "\n".join(col4) + "\n```", inline=False)
-    if len(col5) > 2:
-        embed.add_field(name="Top 84-100", value="```\n" + "\n".join(col5) + "\n```", inline=False)
-
-    if last_updated:
-        embed.set_footer(text=f"Mis à jour le {last_updated}")
 
     await interaction.response.send_message(embed=embed)
+    message = await interaction.original_response()
+    await set_leaderboard_message(interaction.guild.id, interaction.channel_id, message.id)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
@@ -686,9 +768,29 @@ async def refresh_leaderboard_cmd(interaction: discord.Interaction):
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(hours=RANGE_HOURS)
         await refresh_from_range(start_dt, end_dt)
+        await update_leaderboard_message()
         await interaction.followup.send("OK: leaderboard refreshed.", ephemeral=True)
     except Exception as exc:
         await interaction.followup.send(f"Error: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="removeleaderboard", description="Supprime le leaderboard du serveur.")
+async def removeleaderboard(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    record = await get_leaderboard_message(interaction.guild.id)
+    if not record:
+        await interaction.response.send_message("Aucun leaderboard actif.", ephemeral=True)
+        return
+    try:
+        channel = bot.get_channel(record["channel_id"]) or await bot.fetch_channel(record["channel_id"])
+        message = await channel.fetch_message(record["message_id"])
+        await message.delete()
+    except Exception:
+        pass
+    await clear_leaderboard_message(interaction.guild.id)
+    await interaction.response.send_message("Leaderboard supprimé.", ephemeral=True)
 
 
 @bot.tree.command(name="backfill_step", description="Force a 48h backfill step.")
