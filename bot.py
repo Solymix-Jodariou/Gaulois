@@ -276,49 +276,41 @@ async def refresh_from_range(start_dt, end_dt):
 
 async def backfill_loop():
     while True:
-        cursor, completed, _last_attempt, _last_error = get_backfill_state()
-        if completed:
-            await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
-            continue
-
-        try:
-            start_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
-        except Exception:
-            start_dt = datetime.now(timezone.utc) - timedelta(hours=48)
-
-        end_dt = start_dt + timedelta(hours=48)
-        now_dt = datetime.now(timezone.utc)
-        if end_dt > now_dt:
-            end_dt = now_dt
-
-        try:
-            await refresh_from_range(start_dt, end_dt)
-            last_attempt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            last_error = None
-        except Exception as exc:
-            print(f"Backfill failed: {exc}")
-            last_attempt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            last_error = str(exc)[:500]
-            await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
-            set_backfill_state(cursor, False, last_attempt, last_error)
-            continue
-
-        if end_dt >= now_dt:
-            set_backfill_state(
-                end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                True,
-                last_attempt,
-                last_error,
-            )
-        else:
-            set_backfill_state(
-                end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                False,
-                last_attempt,
-                last_error,
-            )
-
+        await run_backfill_step()
         await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
+
+
+async def run_backfill_step():
+    cursor, completed, _last_attempt, _last_error = get_backfill_state()
+    if completed:
+        return {"status": "done", "cursor": cursor}
+
+    try:
+        start_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    except Exception:
+        start_dt = datetime.now(timezone.utc) - timedelta(hours=48)
+
+    end_dt = start_dt + timedelta(hours=48)
+    now_dt = datetime.now(timezone.utc)
+    if end_dt > now_dt:
+        end_dt = now_dt
+
+    last_attempt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_error = None
+
+    try:
+        await refresh_from_range(start_dt, end_dt)
+    except Exception as exc:
+        last_error = str(exc)[:500]
+        set_backfill_state(cursor, False, last_attempt, last_error)
+        print(f"Backfill failed: {exc}")
+        return {"status": "error", "cursor": cursor, "error": last_error}
+
+    new_cursor = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    completed = end_dt >= now_dt
+    set_backfill_state(new_cursor, completed, last_attempt, last_error)
+    print(f"Backfill step: {cursor} -> {new_cursor} (done={completed})")
+    return {"status": "ok", "cursor": new_cursor, "completed": completed}
 
 
 async def live_loop():
@@ -395,6 +387,13 @@ async def refresh_leaderboard_cmd(interaction: discord.Interaction):
         await interaction.followup.send("OK: leaderboard refreshed.", ephemeral=True)
     except Exception as exc:
         await interaction.followup.send(f"Error: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="backfill_step", description="Force une tranche de backfill (48h).")
+async def backfill_step_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    result = await run_backfill_step()
+    await interaction.followup.send(f"{result}", ephemeral=True)
 
 
 @bot.tree.command(name="debug_api", description="Debug OpenFront API.")
