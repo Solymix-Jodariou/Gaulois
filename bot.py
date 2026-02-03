@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 
 # Configuration
-TOKEN = 'MTM1MzQ3NDk3MjA1OTgzMjMzMA.GR6JDz.tQqCL1f7LI80WI3U4hVsJyusfN7d1MmA_DPKXQ'
+TOKEN = ''
 TAG_CLAN = 'GAL'
 API_BASE = 'https://api.openfront.io'
 
