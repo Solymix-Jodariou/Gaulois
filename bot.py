@@ -10,6 +10,10 @@ TOKEN = os.getenv('DISCORD_TOKEN')  # prend la variable d'environnement
 TAG_CLAN = 'GAL'
 API_BASE = 'https://api.openfront.io'
 
+# Vérification du token
+if not TOKEN:
+    raise ValueError("❌ DISCORD_TOKEN n'est pas défini. Veuillez configurer la variable d'environnement sur Railway.")
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -52,6 +56,16 @@ def get_clan_stats(leaderboard_data, clan_tag):
         if clan['clanTag'].upper() == clan_tag.upper():
             return clan
     return None
+
+# ==================== HELPERS ====================
+
+def is_tagged_user(username: str, tag: str) -> bool:
+    """Détecte le tag clan dans un pseudo (ex: [GAL] ou GAL <pseudo>)."""
+    if not username:
+        return False
+    upper_name = username.upper()
+    upper_tag = tag.upper()
+    return f'[{upper_tag}]' in upper_name or upper_name.startswith(f'{upper_tag} ')
 
 # ==================== COMMANDES ====================
 
@@ -173,49 +187,51 @@ async def stats_gal(ctx):
 
 @bot.command(name='leaderboard_clans')
 async def leaderboard_clans(ctx, top: int = 10):
-    """Affiche le classement des clans"""
-    await ctx.send(f"🔄 Récupération du top {top}...")
+    """Affiche le leaderboard des joueurs portant le tag clan"""
+    await ctx.send(f"🔄 Récupération du top {top} joueurs [{TAG_CLAN}]...")
     
     data = await get_leaderboard()
-    if not data or 'clans' not in data:
+    if not data:
         await ctx.send("❌ Impossible de récupérer le leaderboard")
         return
-    
-    # Trier par W/L ratio
-    clans_sorted = sorted(
-        data['clans'], 
-        key=lambda x: x['weightedWLRatio'], 
-        reverse=True
-    )[:top]
-    
+
+    players = data.get('players')
+    if not players:
+        await ctx.send(
+            "❌ Le leaderboard ne fournit pas la liste des joueurs. "
+            "L'API renvoie seulement les clans."
+        )
+        return
+
+    gal_players = [p for p in players if is_tagged_user(p.get('username', ''), TAG_CLAN)]
+    if not gal_players:
+        await ctx.send(f"❌ Aucun joueur **{TAG_CLAN}** trouvé dans le leaderboard")
+        return
+
+    def sort_key(player):
+        return player.get('weightedWLRatio', player.get('wins', player.get('games', 0)))
+
+    gal_players_sorted = sorted(gal_players, key=sort_key, reverse=True)[:top]
+
     embed = discord.Embed(
-        title=f"🏆 Top {top} Clans - Classement W/L Ratio",
+        title=f"🏆 Top {top} Joueurs [{TAG_CLAN}] - Leaderboard",
         color=discord.Color.purple()
     )
-    
+
     description = "```\n"
-    description += f"{'#':<3} {'TAG':<8} {'W/L':<8} {'Games':<8}\n"
-    description += "-" * 35 + "\n"
-    
-    for i, clan in enumerate(clans_sorted, 1):
-        tag = clan['clanTag']
-        wlr = clan['weightedWLRatio']
-        games = clan['games']
-        
-        # Highlight du clan GAL
-        if tag == TAG_CLAN:
-            description += f"►{i:<2} {tag:<8} {wlr:<8.2f} {games:<8}\n"
-        else:
-            description += f"{i:<3} {tag:<8} {wlr:<8.2f} {games:<8}\n"
-    
+    description += f"{'#':<3} {'JOUEUR':<20} {'W/L':<8} {'Games':<8}\n"
+    description += "-" * 43 + "\n"
+
+    for i, player in enumerate(gal_players_sorted, 1):
+        username = player.get('username', 'Unknown')[:20]
+        wlr = player.get('weightedWLRatio')
+        games = player.get('games', player.get('playerSessions', 'n/a'))
+        wlr_display = f"{wlr:.2f}" if isinstance(wlr, (int, float)) else "n/a"
+        description += f"{i:<3} {username:<20} {wlr_display:<8} {games:<8}\n"
+
     description += "```"
     embed.description = description
-    
-    # Trouver la position du clan GAL
-    gal_position = next((i+1 for i, c in enumerate(clans_sorted) if c['clanTag'] == TAG_CLAN), None)
-    if gal_position:
-        embed.set_footer(text=f"📍 {TAG_CLAN} est #{gal_position}")
-    
+
     await ctx.send(embed=embed)
 
 @bot.command(name='game')
@@ -256,7 +272,7 @@ async def find_gal_players(ctx, game_id: str = None):
     gal_players = []
     for player in data['info']['players']:
         username = player.get('username', 'Unknown')
-        if f'[{TAG_CLAN}]' in username or username.startswith(f'{TAG_CLAN} '):
+        if is_tagged_user(username, TAG_CLAN):
             gal_players.append(username)
     
     if gal_players:
@@ -267,4 +283,9 @@ async def find_gal_players(ctx, game_id: str = None):
 
 # ==================== LANCEMENT ====================
 
-bot.run(TOKEN)
+if __name__ == '__main__':
+    if not TOKEN:
+        print("❌ ERREUR: DISCORD_TOKEN n'est pas défini dans les variables d'environnement")
+        print("💡 Configurez la variable DISCORD_TOKEN sur Railway")
+        exit(1)
+    bot.run(TOKEN)
