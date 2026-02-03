@@ -33,7 +33,7 @@ RANGE_HOURS = int(os.getenv("LEADERBOARD_RANGE_HOURS", "24"))
 MAX_SESSIONS = int(os.getenv("LEADERBOARD_MAX_SESSIONS", "300"))
 BACKFILL_START = os.getenv("LEADERBOARD_BACKFILL_START", "2026-01-01T00:00:00Z")
 BACKFILL_INTERVAL_MINUTES = int(os.getenv("LEADERBOARD_BACKFILL_INTERVAL_MINUTES", "5"))
-MIN_GAMES = int(os.getenv("LEADERBOARD_MIN_GAMES", "5"))
+MIN_GAMES = int(os.getenv("LEADERBOARD_MIN_GAMES", "10"))
 PRIOR_GAMES = int(os.getenv("LEADERBOARD_PRIOR_GAMES", "50"))
 SCORE_RATIO_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_RATIO_WEIGHT", "100"))
 SCORE_GAMES_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_GAMES_WEIGHT", "0.1"))
@@ -75,6 +75,12 @@ def calculate_score(wins, losses, games):
         return 0.0
     ratio = wins / games
     return ratio * SCORE_RATIO_WEIGHT + games * SCORE_GAMES_WEIGHT
+
+
+def format_local_time(dt: datetime) -> str:
+    offset_hours = int(os.getenv("LEADERBOARD_TIMEZONE_OFFSET_HOURS", "1"))
+    local_dt = dt + timedelta(hours=offset_hours)
+    return local_dt.strftime("%Y-%m-%d %H:%M")
 
 
 def is_clan_username(username: str) -> bool:
@@ -428,7 +434,8 @@ async def build_leaderboard_embed(guild):
         color=discord.Color.orange(),
     )
 
-    top = players[:100]
+    filtered = [p for p in players if p["total_games"] >= MIN_GAMES]
+    top = filtered[:100]
     total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
     total_losses = sum(p["losses_ffa"] + p["losses_team"] for p in top)
     total_players = len(top)
@@ -519,7 +526,13 @@ async def build_leaderboard_embed(guild):
         embed.add_field(name="Top 84-100", value="```\n" + "\n".join(col5) + "\n```", inline=False)
 
     if last_updated:
-        embed.set_footer(text=f"Mis à jour le {last_updated}")
+        try:
+            last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            next_dt = last_dt + timedelta(minutes=REFRESH_MINUTES)
+            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+        except Exception:
+            footer = f"Mis à jour le {last_updated}"
+        embed.set_footer(text=footer)
 
     return embed
 
