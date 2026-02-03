@@ -25,7 +25,7 @@ USER_AGENT = "Mozilla/5.0 (GauloisBot)"
 REFRESH_MINUTES = int(os.getenv("LEADERBOARD_REFRESH_MINUTES", "30"))
 RANGE_HOURS = int(os.getenv("LEADERBOARD_RANGE_HOURS", "24"))
 MAX_SESSIONS = int(os.getenv("LEADERBOARD_MAX_SESSIONS", "300"))
-BACKFILL_START = os.getenv("LEADERBOARD_BACKFILL_START", "2025-11-01T00:00:00Z")
+BACKFILL_START = os.getenv("LEADERBOARD_BACKFILL_START", "2026-01-01T00:00:00Z")
 BACKFILL_INTERVAL_MINUTES = int(os.getenv("LEADERBOARD_BACKFILL_INTERVAL_MINUTES", "5"))
 
 if RANGE_HOURS > 48:
@@ -512,6 +512,32 @@ async def stats_progress(interaction: discord.Interaction):
         f"Losses total: {stats['losses_total']}"
     )
     await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(name="reset_leaderboard", description="Réinitialise le leaderboard (Postgres).")
+async def reset_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    async with pool.acquire() as conn:
+        await conn.execute("TRUNCATE TABLE player_stats")
+        await conn.execute("TRUNCATE TABLE processed_games")
+        await conn.execute(
+            """
+            INSERT INTO backfill_state (id, cursor, completed, last_attempt, last_error, last_sessions, last_games_processed)
+            VALUES (1, $1, FALSE, NULL, NULL, 0, 0)
+            ON CONFLICT (id) DO UPDATE SET
+                cursor = EXCLUDED.cursor,
+                completed = FALSE,
+                last_attempt = NULL,
+                last_error = NULL,
+                last_sessions = 0,
+                last_games_processed = 0
+            """,
+            BACKFILL_START,
+        )
+    await interaction.followup.send(
+        f"OK: leaderboard réinitialisé. Nouveau départ: {BACKFILL_START}",
+        ephemeral=True,
+    )
 
 
 if __name__ == "__main__":
