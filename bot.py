@@ -23,6 +23,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Base de données simple (pseudo discord -> pseudo openfront)
 registered_users = {}
+# Base de données simple (discord -> player_id openfront)
+registered_player_ids = {}
 
 # ==================== FONCTIONS API ====================
 
@@ -70,6 +72,7 @@ async def get_recent_games():
         "matches",
     ]
     async with aiohttp.ClientSession() as session:
+        best_error = None
         for endpoint in endpoints_to_try:
             try:
                 async with session.get(
@@ -81,9 +84,14 @@ async def get_recent_games():
                         return await resp.json(), None
                     text = await resp.text()
                     last_error = f"HTTP {resp.status}: {text[:200]}"
+                    # Si l'API est privée, inutile de tester plus loin
+                    if resp.status in (401, 403):
+                        return None, last_error
+                    best_error = best_error or last_error
             except Exception as e:
                 last_error = str(e)
-        return None, last_error
+                best_error = best_error or last_error
+        return None, best_error or "Erreur inconnue"
 
 async def get_game_data(game_id):
     """Récupère les données d'une partie"""
@@ -101,6 +109,36 @@ async def get_game_data(game_id):
         except Exception as e:
             print(f"❌ Erreur API game: {e}")
             return None, str(e)
+
+async def get_player_data(player_id):
+    """Récupère les données d'un joueur via différents endpoints possibles."""
+    endpoints_to_try = [
+        f"player/{player_id}",
+        f"players/{player_id}",
+        f"profile/{player_id}",
+        f"user/{player_id}",
+        f"users/{player_id}",
+        f"account/{player_id}",
+    ]
+    async with aiohttp.ClientSession() as session:
+        best_error = None
+        for endpoint in endpoints_to_try:
+            try:
+                async with session.get(
+                    f'{API_BASE}/{endpoint}',
+                    headers=build_api_headers(),
+                    timeout=10,
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json(), None
+                    text = await resp.text()
+                    last_error = f"HTTP {resp.status}: {text[:200]}"
+                    if resp.status in (401, 403):
+                        return None, last_error
+                    best_error = best_error or last_error
+            except Exception as e:
+                best_error = best_error or str(e)
+        return None, best_error or "Erreur inconnue"
 
 def get_clan_stats(leaderboard_data, clan_tag):
     """Extrait les stats d'un clan du leaderboard"""
@@ -165,6 +203,21 @@ async def help_command(ctx):
         inline=False
     )
     embed.add_field(
+        name="!register_id <player_id>",
+        value="Enregistre ton Player ID OpenFront",
+        inline=False
+    )
+    embed.add_field(
+        name="!myid",
+        value="Affiche ton Player ID enregistré",
+        inline=False
+    )
+    embed.add_field(
+        name="!stats_id [player_id]",
+        value="Affiche les stats d'un Player ID",
+        inline=False
+    )
+    embed.add_field(
         name="!unregister",
         value="Supprime ton pseudo enregistré",
         inline=False
@@ -203,6 +256,16 @@ async def register(ctx, pseudo: str = None):
     registered_users[str(ctx.author.id)] = pseudo
     await ctx.send(f"✅ {ctx.author.mention} enregistré avec le pseudo **{pseudo}**")
 
+@bot.command(name='register_id')
+async def register_id(ctx, player_id: str = None):
+    """Enregistre le Player ID OpenFront"""
+    if not player_id:
+        await ctx.send("❌ Usage : `!register_id <player_id>`")
+        return
+
+    registered_player_ids[str(ctx.author.id)] = player_id
+    await ctx.send(f"✅ {ctx.author.mention} enregistré avec le Player ID **{player_id}**")
+
 @bot.command(name='unregister')
 async def unregister(ctx):
     """Supprime l'enregistrement"""
@@ -213,6 +276,16 @@ async def unregister(ctx):
     else:
         await ctx.send("❌ Tu n'es pas enregistré")
 
+@bot.command(name='myid')
+async def myid(ctx):
+    """Affiche le Player ID enregistré"""
+    user_id = str(ctx.author.id)
+    if user_id in registered_player_ids:
+        player_id = registered_player_ids[user_id]
+        await ctx.send(f"🆔 Ton Player ID OpenFront : **{player_id}**")
+    else:
+        await ctx.send("❌ Tu n'as pas de Player ID enregistré. Utilise `!register_id <player_id>`")
+
 @bot.command(name='myinfo')
 async def myinfo(ctx):
     """Affiche les infos de l'utilisateur"""
@@ -222,6 +295,28 @@ async def myinfo(ctx):
         await ctx.send(f"📋 Ton pseudo Openfront : **{pseudo}**")
     else:
         await ctx.send("❌ Tu n'es pas enregistré. Utilise `!register <pseudo>`")
+
+@bot.command(name='stats_id')
+async def stats_id(ctx, player_id: str = None):
+    """Affiche les stats d'un Player ID"""
+    if not player_id:
+        player_id = registered_player_ids.get(str(ctx.author.id))
+        if not player_id:
+            await ctx.send("❌ Usage : `!stats_id <player_id>` ou enregistre avec `!register_id`")
+            return
+
+    await ctx.send(f"🔄 Récupération des stats du Player ID {player_id}...")
+
+    data, error = await get_player_data(player_id)
+    if not data:
+        await ctx.send(f"❌ Impossible de récupérer les stats. {format_api_error(error)}")
+        return
+
+    json_str = json.dumps(data, indent=2)
+    if len(json_str) > 1900:
+        json_str = json_str[:1900] + "\n...\n(tronqué)"
+
+    await ctx.send(f"```json\n{json_str}\n```")
 
 @bot.command(name='stats_gal')
 async def stats_gal(ctx):
