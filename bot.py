@@ -50,6 +50,7 @@ SCORE_GAMES_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_GAMES_WEIGHT", "0.1"))
 WIN_NOTIFY_CHANNEL_ID = os.getenv("WIN_NOTIFY_CHANNEL_ID")
 WIN_NOTIFY_POLL_SECONDS = int(os.getenv("WIN_NOTIFY_POLL_SECONDS", "300"))
 WIN_NOTIFY_RANGE_HOURS = int(os.getenv("WIN_NOTIFY_RANGE_HOURS", "6"))
+WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = int(os.getenv("WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES", "60"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -81,6 +82,8 @@ if WIN_NOTIFY_RANGE_HOURS < 1:
     WIN_NOTIFY_RANGE_HOURS = 1
 if WIN_NOTIFY_RANGE_HOURS > 48:
     WIN_NOTIFY_RANGE_HOURS = 48
+if WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES < 1:
+    WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = 1
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -353,6 +356,21 @@ async def init_db():
                 game_id TEXT PRIMARY KEY,
                 notified_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS win_notify_state (
+                id INTEGER PRIMARY KEY,
+                last_empty_at TEXT
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO win_notify_state (id)
+            VALUES (1)
+            ON CONFLICT (id) DO NOTHING
             """
         )
         await conn.execute(
@@ -849,6 +867,27 @@ async def mark_win_notified(game_id: str):
         await conn.execute(
             "INSERT INTO win_notifications (game_id) VALUES ($1) ON CONFLICT DO NOTHING",
             game_id,
+        )
+
+
+async def get_last_empty_notify():
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_empty_at FROM win_notify_state WHERE id = 1"
+        )
+    return row[0] if row else None
+
+
+async def set_last_empty_notify(value: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO win_notify_state (id, last_empty_at)
+            VALUES (1, $1)
+            ON CONFLICT (id) DO UPDATE SET
+                last_empty_at = EXCLUDED.last_empty_at
+            """,
+            value,
         )
 
 
@@ -1785,6 +1824,7 @@ async def win_notify_loop():
             headers = {"User-Agent": USER_AGENT}
             async with aiohttp.ClientSession(headers=headers) as session:
                 sessions = await fetch_clan_sessions(session, start_iso, end_iso)
+                notified_any = False
                 for s in sessions:
                     if not s.get("hasWon"):
                         continue
@@ -1803,6 +1843,24 @@ async def win_notify_loop():
                     embed = build_win_embed(info)
                     await channel.send(embed=embed)
                     await mark_win_notified(game_id)
+                    notified_any = True
+                if not bootstrap and not notified_any:
+                    last_empty = await get_last_empty_notify()
+                    now_dt = datetime.now(timezone.utc)
+                    send_empty = True
+                    if last_empty:
+                        try:
+                            last_dt = datetime.fromisoformat(last_empty.replace("Z", "+00:00"))
+                            delta = now_dt - last_dt
+                            if delta.total_seconds() < WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES * 60:
+                                send_empty = False
+                        except Exception:
+                            pass
+                    if send_empty:
+                        await channel.send(
+                            f"Aucune victoire {CLAN_DISPLAY} sur les {WIN_NOTIFY_RANGE_HOURS} dernières heures."
+                        )
+                        await set_last_empty_notify(now_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
         except Exception as exc:
             print(f"Win notify failed: {exc}")
         bootstrap = False
