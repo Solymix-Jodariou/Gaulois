@@ -247,29 +247,54 @@ async def load_leaderboard():
             FROM player_stats
             """
         )
-    players = []
+    aggregated = {}
     last_updated = None
     for row in rows:
-        ratio = calculate_ratio(row[2], row[3], row[4], row[5])
-        total_wins = row[2] + row[4]
-        total_losses = row[3] + row[5]
+        raw_name = row[1] or row[0]
+        key = normalize_username(raw_name).upper()
+        if not key:
+            continue
+        entry = aggregated.setdefault(
+            key,
+            {
+                "display_name": build_display_name(raw_name),
+                "wins_ffa": 0,
+                "losses_ffa": 0,
+                "wins_team": 0,
+                "losses_team": 0,
+                "updated_at": None,
+            },
+        )
+        entry["wins_ffa"] += row[2]
+        entry["losses_ffa"] += row[3]
+        entry["wins_team"] += row[4]
+        entry["losses_team"] += row[5]
+        if row[6] and (entry["updated_at"] is None or row[6] > entry["updated_at"]):
+            entry["updated_at"] = row[6]
+        if row[6] and (last_updated is None or row[6] > last_updated):
+            last_updated = row[6]
+
+    players = []
+    for key, entry in aggregated.items():
+        ratio = calculate_ratio(
+            entry["wins_ffa"], entry["losses_ffa"], entry["wins_team"], entry["losses_team"]
+        )
+        total_wins = entry["wins_ffa"] + entry["wins_team"]
+        total_losses = entry["losses_ffa"] + entry["losses_team"]
         total_games = total_wins + total_losses
-        display_name = row[1] or row[0]
         players.append(
             {
-                "username": row[0],
-                "display_name": display_name,
-                "wins_ffa": row[2],
-                "losses_ffa": row[3],
-                "wins_team": row[4],
-                "losses_team": row[5],
+                "username": key,
+                "display_name": entry["display_name"],
+                "wins_ffa": entry["wins_ffa"],
+                "losses_ffa": entry["losses_ffa"],
+                "wins_team": entry["wins_team"],
+                "losses_team": entry["losses_team"],
                 "ratio": ratio,
                 "total_wins": total_wins,
                 "total_games": total_games,
             }
         )
-        if row[6]:
-            last_updated = row[6]
     players.sort(
         key=lambda p: (
             p["total_games"] >= MIN_GAMES,
