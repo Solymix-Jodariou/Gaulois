@@ -10,7 +10,6 @@ from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
-VERSION = "2026-02-03-commands-sync-2"
 
 DB_PATH = "leaderboard.db"
 CLAN_TAG = os.getenv("CLAN_TAG", "GAL")
@@ -22,6 +21,8 @@ USER_AGENT = "Mozilla/5.0 (GauloisBot)"
 REFRESH_MINUTES = int(os.getenv("LEADERBOARD_REFRESH_MINUTES", "30"))
 RANGE_HOURS = int(os.getenv("LEADERBOARD_RANGE_HOURS", "24"))
 MAX_SESSIONS = int(os.getenv("LEADERBOARD_MAX_SESSIONS", "300"))
+BACKFILL_START = os.getenv("LEADERBOARD_BACKFILL_START", "2025-11-01T00:00:00Z")
+BACKFILL_INTERVAL_MINUTES = int(os.getenv("LEADERBOARD_BACKFILL_INTERVAL_MINUTES", "10"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -33,13 +34,11 @@ if MAX_SESSIONS < 50:
     MAX_SESSIONS = 50
 if MAX_SESSIONS > 1000:
     MAX_SESSIONS = 1000
+if BACKFILL_INTERVAL_MINUTES < 5:
+    BACKFILL_INTERVAL_MINUTES = 5
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-leaderboard_cache = []
-leaderboard_updated_at = None
-leaderboard_meta = {"sessions": 0, "games": 0, "players": 0}
 
 
 def get_db():
@@ -50,47 +49,59 @@ def init_db():
     with get_db() as conn:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS clan_cache (
+            CREATE TABLE IF NOT EXISTS player_stats (
+                username TEXT PRIMARY KEY,
+                wins_ffa INTEGER DEFAULT 0,
+                losses_ffa INTEGER DEFAULT 0,
+                wins_team INTEGER DEFAULT 0,
+                losses_team INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_games (
+                game_id TEXT PRIMARY KEY
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backfill_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                data TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                meta TEXT NOT NULL
+                cursor TEXT NOT NULL,
+                completed INTEGER DEFAULT 0
             )
             """
         )
 
 
-def load_cache():
-    global leaderboard_cache, leaderboard_updated_at, leaderboard_meta
+def get_backfill_state():
     with get_db() as conn:
         row = conn.execute(
-            "SELECT data, updated_at, meta FROM clan_cache WHERE id = 1"
+            "SELECT cursor, completed FROM backfill_state WHERE id = 1"
         ).fetchone()
     if row:
-        leaderboard_cache = json.loads(row[0])
-        leaderboard_updated_at = row[1]
-        leaderboard_meta = json.loads(row[2])
+        return row[0], bool(row[1])
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO backfill_state (id, cursor, completed) VALUES (1, ?, 0)",
+            (BACKFILL_START,),
+        )
+    return BACKFILL_START, False
 
 
-def save_cache(data, updated_at, meta):
+def set_backfill_state(cursor, completed):
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO clan_cache (id, data, updated_at, meta)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                data = excluded.data,
-                updated_at = excluded.updated_at,
-                meta = excluded.meta
+            INSERT INTO backfill_state (id, cursor, completed)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, completed = excluded.completed
             """,
-            (json.dumps(data), updated_at, json.dumps(meta)),
+            (cursor, 1 if completed else 0),
         )
-
-
-def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
-    wins = wins_ffa + wins_team
-    losses = losses_ffa + losses_team
-    return wins / (losses + 1)
 
 
 def is_clan_username(username: str) -> bool:
@@ -101,159 +112,226 @@ def is_clan_username(username: str) -> bool:
     return f"[{tag}]" in upper or upper.startswith(f"{tag} ")
 
 
-def game_mode(info):
-    return (info.get("config", {}) or {}).get("gameMode") or ""
+def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
+    wins = wins_ffa + wins_team
+    losses = losses_ffa + losses_team
+    return wins / (losses + 1)
 
 
-def compute_from_games(game_infos, session_wins):
-    players = {}
+def is_game_processed(game_id: str) -> bool:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM processed_games WHERE game_id = ?",
+            (game_id,),
+        ).fetchone()
+    return row is not None
 
-    for info, has_won in game_infos:
-        mode = game_mode(info).lower()
-        for p in info.get("players", []):
-            username = p.get("username") or ""
-            if not is_clan_username(username):
-                continue
 
-            entry = players.setdefault(
-                username,
-                {"wins_ffa": 0, "losses_ffa": 0, "wins_team": 0, "losses_team": 0},
-            )
-
-            if "free for all" in mode or mode == "ffa":
-                if has_won:
-                    entry["wins_ffa"] += 1
-                else:
-                    entry["losses_ffa"] += 1
-            elif "team" in mode:
-                if has_won:
-                    entry["wins_team"] += 1
-                else:
-                    entry["losses_team"] += 1
-
-    results = []
-    for username, stats in players.items():
-        ratio = calculate_ratio(
-            stats["wins_ffa"],
-            stats["losses_ffa"],
-            stats["wins_team"],
-            stats["losses_team"],
+def mark_game_processed(game_id: str):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO processed_games (game_id) VALUES (?)",
+            (game_id,),
         )
-        total_wins = stats["wins_ffa"] + stats["wins_team"]
-        results.append(
+
+
+def upsert_player(username, wins_ffa, losses_ffa, wins_team, losses_team):
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO player_stats (
+                username, wins_ffa, losses_ffa, wins_team, losses_team, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                wins_ffa = wins_ffa + excluded.wins_ffa,
+                losses_ffa = losses_ffa + excluded.losses_ffa,
+                wins_team = wins_team + excluded.wins_team,
+                losses_team = losses_team + excluded.losses_team,
+                updated_at = excluded.updated_at
+            """,
+            (
+                username,
+                wins_ffa,
+                losses_ffa,
+                wins_team,
+                losses_team,
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+
+
+def load_leaderboard():
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT username, wins_ffa, losses_ffa, wins_team, losses_team, updated_at
+            FROM player_stats
+            """
+        ).fetchall()
+    players = []
+    last_updated = None
+    for username, wins_ffa, losses_ffa, wins_team, losses_team, updated_at in rows:
+        ratio = calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team)
+        total_wins = wins_ffa + wins_team
+        players.append(
             {
-                "pseudo": username,
-                "wins_ffa": stats["wins_ffa"],
-                "losses_ffa": stats["losses_ffa"],
-                "wins_team": stats["wins_team"],
-                "losses_team": stats["losses_team"],
+                "username": username,
+                "wins_ffa": wins_ffa,
+                "losses_ffa": losses_ffa,
+                "wins_team": wins_team,
+                "losses_team": losses_team,
                 "ratio": ratio,
                 "total_wins": total_wins,
             }
         )
+        if updated_at:
+            last_updated = updated_at
+    players.sort(key=lambda p: (p["ratio"], p["total_wins"]), reverse=True)
+    return players, last_updated
 
-    results.sort(key=lambda p: (p["ratio"], p["total_wins"]), reverse=True)
-    return results
+
+def game_mode(info):
+    return (info.get("config", {}) or {}).get("gameMode") or ""
 
 
-async def fetch_clan_sessions(start_iso, end_iso):
+def process_game(info, clan_has_won):
+    mode = game_mode(info).lower()
+    is_ffa = "free for all" in mode or mode == "ffa"
+    is_team = "team" in mode
+
+    for p in info.get("players", []):
+        username = p.get("username") or ""
+        if not is_clan_username(username):
+            continue
+
+        if is_ffa:
+            if clan_has_won:
+                upsert_player(username, 1, 0, 0, 0)
+            else:
+                upsert_player(username, 0, 1, 0, 0)
+        elif is_team:
+            if clan_has_won:
+                upsert_player(username, 0, 0, 1, 0)
+            else:
+                upsert_player(username, 0, 0, 0, 1)
+
+
+async def fetch_clan_sessions(session, start_iso, end_iso):
     url = f"{API_BASE}/clan/{CLAN_TAG}/sessions"
     params = {"start": start_iso, "end": end_iso}
-    headers = {"User-Agent": USER_AGENT}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(url, params=params, timeout=25) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
-            return await resp.json()
+    async with session.get(url, params=params, timeout=25) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+        return await resp.json()
 
 
-async def fetch_game_info(game_id):
+async def fetch_game_info(session, game_id):
     url = f"{API_BASE}/game/{game_id}"
-    headers = {"User-Agent": USER_AGENT}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(url, params={"turns": "false"}, timeout=25) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
-            data = await resp.json()
-            return data.get("info", {})
+    async with session.get(url, params={"turns": "false"}, timeout=25) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+        data = await resp.json()
+        return data.get("info", {})
 
 
-async def refresh_leaderboard():
-    global leaderboard_cache, leaderboard_updated_at, leaderboard_meta
-
-    end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(hours=RANGE_HOURS)
+async def refresh_from_range(start_dt, end_dt):
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    sessions = await fetch_clan_sessions(start_iso, end_iso)
-    sessions = sessions[:MAX_SESSIONS]
+    headers = {"User-Agent": USER_AGENT}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        sessions = await fetch_clan_sessions(session, start_iso, end_iso)
+        sessions = sessions[:MAX_SESSIONS]
 
-    game_infos = []
-    for s in sessions:
-        game_id = s.get("gameId")
-        if not game_id:
+        for s in sessions:
+            game_id = s.get("gameId")
+            if not game_id:
+                continue
+            if is_game_processed(game_id):
+                continue
+            try:
+                info = await fetch_game_info(session, game_id)
+            except Exception:
+                continue
+            clan_has_won = bool(s.get("hasWon"))
+            process_game(info, clan_has_won)
+            mark_game_processed(game_id)
+
+        return len(sessions)
+
+
+async def backfill_loop():
+    while True:
+        cursor, completed = get_backfill_state()
+        if completed:
+            await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
             continue
-        has_won = bool(s.get("hasWon"))
+
         try:
-            info = await fetch_game_info(game_id)
-            game_infos.append((info, has_won))
+            start_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
         except Exception:
+            start_dt = datetime.now(timezone.utc) - timedelta(hours=48)
+
+        end_dt = start_dt + timedelta(hours=48)
+        now_dt = datetime.now(timezone.utc)
+        if end_dt > now_dt:
+            end_dt = now_dt
+
+        try:
+            await refresh_from_range(start_dt, end_dt)
+        except Exception as exc:
+            print(f"Backfill failed: {exc}")
+            await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
             continue
 
-    leaderboard_cache = compute_from_games(game_infos, sessions)
-    leaderboard_updated_at = end_dt.strftime("%Y-%m-%d %H:%M UTC")
-    leaderboard_meta = {
-        "sessions": len(sessions),
-        "games": len(game_infos),
-        "players": len(leaderboard_cache),
-    }
-    save_cache(leaderboard_cache, leaderboard_updated_at, leaderboard_meta)
+        if end_dt >= now_dt:
+            set_backfill_state(end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), True)
+        else:
+            set_backfill_state(end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), False)
+
+        await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
 
 
-async def refresh_loop():
+async def live_loop():
     while True:
         try:
-            await refresh_leaderboard()
-            print("Leaderboard refreshed")
+            end_dt = datetime.now(timezone.utc)
+            start_dt = end_dt - timedelta(hours=RANGE_HOURS)
+            await refresh_from_range(start_dt, end_dt)
+            print("Live refresh done")
         except Exception as exc:
-            print(f"Leaderboard refresh failed: {exc}")
+            print(f"Live refresh failed: {exc}")
         await asyncio.sleep(REFRESH_MINUTES * 60)
 
 
 @bot.event
 async def on_ready():
     init_db()
-    load_cache()
-    print(f"Bot version: {VERSION}")
     try:
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
-            # Sync guild commands (fast)
             await bot.tree.sync(guild=guild)
-            print(f"Commands synced for guild {GUILD_ID}")
-            # Remove old global commands like /register
-            bot.tree.clear_commands(guild=None)
             await bot.tree.sync(guild=None)
-            print("Global commands cleared and synced")
+            print(f"Commands synced for guild {GUILD_ID}")
         else:
             await bot.tree.sync()
             print("Commands synced globally")
     except Exception as exc:
         print(f"Command sync error: {exc}")
 
-    bot.loop.create_task(refresh_loop())
+    bot.loop.create_task(backfill_loop())
+    bot.loop.create_task(live_loop())
     print(f"Bot connected: {bot.user}")
-    print("Registered commands:", [c.name for c in bot.tree.get_commands()])
 
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
 async def setleaderboard(interaction: discord.Interaction):
-    if not leaderboard_cache:
+    players, last_updated = load_leaderboard()
+    if not players:
         await interaction.response.send_message(
-            f"No data for {CLAN_DISPLAY}. Wait for refresh or increase range.",
+            f"No data for {CLAN_DISPLAY}. Wait for refresh.",
             ephemeral=True,
         )
         return
@@ -263,9 +341,9 @@ async def setleaderboard(interaction: discord.Interaction):
         color=discord.Color.orange(),
     )
 
-    for i, p in enumerate(leaderboard_cache[:30], 1):
+    for i, p in enumerate(players[:30], 1):
         embed.add_field(
-            name=f"#{i} {p['pseudo']}",
+            name=f"#{i} {p['username']}",
             value=(
                 f"Ratio: {p['ratio']:.2f}\n"
                 f"FFA: {p['wins_ffa']}W / {p['losses_ffa']}L\n"
@@ -274,53 +352,37 @@ async def setleaderboard(interaction: discord.Interaction):
             inline=False,
         )
 
-    if leaderboard_updated_at:
-        embed.set_footer(
-            text=(
-                f"Updated {leaderboard_updated_at} | "
-                f"Sessions: {leaderboard_meta['sessions']} | "
-                f"Games: {leaderboard_meta['games']}"
-            )
-        )
+    if last_updated:
+        embed.set_footer(text=f"Updated {last_updated}")
 
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
+async def refresh_leaderboard_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(hours=RANGE_HOURS)
+        await refresh_from_range(start_dt, end_dt)
+        await interaction.followup.send("OK: leaderboard refreshed.", ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Error: {exc}", ephemeral=True)
 
 
 @bot.tree.command(name="debug_api", description="Debug OpenFront API.")
 async def debug_api(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(hours=RANGE_HOURS)
-    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    try:
-        sessions = await fetch_clan_sessions(start_iso, end_iso)
-        count = len(sessions)
-        sample = sessions[0] if count > 0 else None
-        msg = (
-            f"OK\n"
-            f"Tag: {CLAN_TAG}\n"
-            f"Range: {start_iso} -> {end_iso}\n"
-            f"Sessions: {count}\n"
-            f"Sample: {sample}"
-        )
-        await interaction.followup.send(msg, ephemeral=True)
-    except Exception as exc:
-        await interaction.followup.send(
-            f"API error: {exc}\nTag: {CLAN_TAG}\nRange: {start_iso} -> {end_iso}",
-            ephemeral=True,
-        )
-
-
-@bot.tree.command(name="refresh_leaderboard", description="Force un refresh du leaderboard.")
-async def refresh_leaderboard_cmd(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        await refresh_leaderboard()
-        await interaction.followup.send("OK: leaderboard mis à jour.", ephemeral=True)
-    except Exception as exc:
-        await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
+    cursor, completed = get_backfill_state()
+    msg = (
+        f"Tag: {CLAN_TAG}\n"
+        f"Backfill cursor: {cursor}\n"
+        f"Backfill done: {completed}\n"
+        f"Range hours: {RANGE_HOURS}\n"
+        f"Refresh minutes: {REFRESH_MINUTES}\n"
+        f"Backfill interval minutes: {BACKFILL_INTERVAL_MINUTES}"
+    )
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 if __name__ == "__main__":
