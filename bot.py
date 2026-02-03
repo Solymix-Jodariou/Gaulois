@@ -606,7 +606,7 @@ async def setleaderboard(interaction: discord.Interaction):
             inline=False,
         )
 
-    name_width = 16
+    name_width = 14
 
     def truncate_name(name: str) -> str:
         if len(name) <= name_width:
@@ -635,27 +635,37 @@ async def setleaderboard(interaction: discord.Interaction):
         games = f"{player['total_games']}"
         return f"{rank:<3} {username:<{name_width}} {score:>5}  {team:>7}  {games:>3}"
 
-    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5}  {'TEAM':>7}  {'G':>3}"
-    sep = "-" * (name_width + 24)
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'TEAM':>7} {'G':>3}"
+    sep = "-" * (name_width + 22)
 
     col1 = [header, sep]
     col2 = [header, sep]
     col3 = [header, sep]
+    col4 = [header, sep]
+    col5 = [header, sep]
 
     for i, p in enumerate(top[3:], 4):
-        if i <= 36:
+        if i <= 23:
             col1.append(format_line(i, p))
-        elif i <= 69:
+        elif i <= 43:
             col2.append(format_line(i, p))
-        else:
+        elif i <= 63:
             col3.append(format_line(i, p))
+        elif i <= 83:
+            col4.append(format_line(i, p))
+        else:
+            col5.append(format_line(i, p))
 
     if len(col1) > 2:
-        embed.add_field(name="Top 4-36", value="```\n" + "\n".join(col1) + "\n```", inline=False)
+        embed.add_field(name="Top 4-23", value="```\n" + "\n".join(col1) + "\n```", inline=False)
     if len(col2) > 2:
-        embed.add_field(name="Top 37-69", value="```\n" + "\n".join(col2) + "\n```", inline=False)
+        embed.add_field(name="Top 24-43", value="```\n" + "\n".join(col2) + "\n```", inline=False)
     if len(col3) > 2:
-        embed.add_field(name="Top 70-100", value="```\n" + "\n".join(col3) + "\n```", inline=False)
+        embed.add_field(name="Top 44-63", value="```\n" + "\n".join(col3) + "\n```", inline=False)
+    if len(col4) > 2:
+        embed.add_field(name="Top 64-83", value="```\n" + "\n".join(col4) + "\n```", inline=False)
+    if len(col5) > 2:
+        embed.add_field(name="Top 84-100", value="```\n" + "\n".join(col5) + "\n```", inline=False)
 
     if last_updated:
         embed.set_footer(text=f"Mis à jour le {last_updated}")
