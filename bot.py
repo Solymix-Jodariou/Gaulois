@@ -47,6 +47,9 @@ ONEV1_MAX_GAMES = int(os.getenv("LEADERBOARD_1V1_MAX_GAMES", "200"))
 ONEV1_REFRESH_MINUTES = int(os.getenv("LEADERBOARD_1V1_REFRESH_MINUTES", "60"))
 SCORE_RATIO_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_RATIO_WEIGHT", "100"))
 SCORE_GAMES_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_GAMES_WEIGHT", "0.1"))
+WIN_NOTIFY_CHANNEL_ID = os.getenv("WIN_NOTIFY_CHANNEL_ID")
+WIN_NOTIFY_POLL_SECONDS = int(os.getenv("WIN_NOTIFY_POLL_SECONDS", "300"))
+WIN_NOTIFY_RANGE_HOURS = int(os.getenv("WIN_NOTIFY_RANGE_HOURS", "6"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -72,6 +75,12 @@ if ONEV1_MAX_GAMES > 1000:
     ONEV1_MAX_GAMES = 1000
 if ONEV1_REFRESH_MINUTES < 10:
     ONEV1_REFRESH_MINUTES = 10
+if WIN_NOTIFY_POLL_SECONDS < 60:
+    WIN_NOTIFY_POLL_SECONDS = 60
+if WIN_NOTIFY_RANGE_HOURS < 1:
+    WIN_NOTIFY_RANGE_HOURS = 1
+if WIN_NOTIFY_RANGE_HOURS > 48:
+    WIN_NOTIFY_RANGE_HOURS = 48
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -164,6 +173,52 @@ def is_1v1_game(info):
     if isinstance(player_teams, str) and player_teams.lower() in {"solo", "solos", "1v1"}:
         return True
     return False
+
+
+def extract_gal_players(info):
+    names = []
+    for p in info.get("players", []):
+        username = p.get("username") or ""
+        if is_clan_username(username):
+            names.append(username)
+    return sorted(set(names))
+
+
+def build_win_embed(info):
+    mode = game_mode(info) or "Team"
+    start_raw = info.get("start")
+    end_raw = info.get("end")
+    gal_players = extract_gal_players(info)
+    game_id = info.get("gameID") or "?"
+
+    embed = discord.Embed(
+        title=f"✅ Victoire {CLAN_DISPLAY}",
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Mode", value=str(mode), inline=True)
+    embed.add_field(name="Game ID", value=str(game_id), inline=True)
+    if start_raw:
+        try:
+            start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            embed.add_field(name="Début", value=format_local_time(start_dt), inline=True)
+        except Exception:
+            embed.add_field(name="Début", value=str(start_raw), inline=True)
+    if end_raw:
+        try:
+            end_dt = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+            embed.add_field(name="Fin", value=format_local_time(end_dt), inline=True)
+        except Exception:
+            embed.add_field(name="Fin", value=str(end_raw), inline=True)
+
+    if gal_players:
+        shown = gal_players[:10]
+        more = len(gal_players) - len(shown)
+        players_text = ", ".join(shown)
+        if more > 0:
+            players_text += f" (+{more})"
+        embed.add_field(name="Joueurs [GAL]", value=players_text, inline=False)
+
+    return embed
 
 
 async def fetch_player_sessions(player_id: str):
@@ -289,6 +344,14 @@ async def init_db():
                 guild_id BIGINT PRIMARY KEY,
                 channel_id BIGINT NOT NULL,
                 message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS win_notifications (
+                game_id TEXT PRIMARY KEY,
+                notified_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -768,6 +831,23 @@ async def mark_game_processed_1v1(game_id: str):
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO processed_games_1v1 (game_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            game_id,
+        )
+
+
+async def is_win_notified(game_id: str) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM win_notifications WHERE game_id = $1",
+            game_id,
+        )
+    return row is not None
+
+
+async def mark_win_notified(game_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO win_notifications (game_id) VALUES ($1) ON CONFLICT DO NOTHING",
             game_id,
         )
 
@@ -1690,6 +1770,45 @@ async def live_1v1_loop():
         await asyncio.sleep(ONEV1_REFRESH_MINUTES * 60)
 
 
+async def win_notify_loop():
+    if not WIN_NOTIFY_CHANNEL_ID:
+        return
+    bootstrap = True
+    while True:
+        try:
+            channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(int(WIN_NOTIFY_CHANNEL_ID))
+            end_dt = datetime.now(timezone.utc)
+            start_dt = end_dt - timedelta(hours=WIN_NOTIFY_RANGE_HOURS)
+            start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            headers = {"User-Agent": USER_AGENT}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                sessions = await fetch_clan_sessions(session, start_iso, end_iso)
+                for s in sessions:
+                    if not s.get("hasWon"):
+                        continue
+                    game_id = s.get("gameId")
+                    if not game_id:
+                        continue
+                    if await is_win_notified(game_id):
+                        continue
+                    if bootstrap:
+                        await mark_win_notified(game_id)
+                        continue
+                    try:
+                        info = await fetch_game_info(session, game_id)
+                    except Exception:
+                        continue
+                    embed = build_win_embed(info)
+                    await channel.send(embed=embed)
+                    await mark_win_notified(game_id)
+        except Exception as exc:
+            print(f"Win notify failed: {exc}")
+        bootstrap = False
+        await asyncio.sleep(WIN_NOTIFY_POLL_SECONDS)
+
+
 @bot.event
 async def on_ready():
     await init_db()
@@ -1712,6 +1831,8 @@ async def on_ready():
     bot.loop.create_task(live_loop())
     bot.loop.create_task(backfill_1v1_loop())
     bot.loop.create_task(live_1v1_loop())
+    if WIN_NOTIFY_CHANNEL_ID:
+        bot.loop.create_task(win_notify_loop())
     print(f"Bot connected: {bot.user}")
 
 
