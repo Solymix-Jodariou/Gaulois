@@ -395,23 +395,25 @@ async def setleaderboard(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(
-        title=f"Leaderboard {CLAN_DISPLAY} - Top 30",
+        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 30",
         color=discord.Color.orange(),
     )
 
+    lines = []
+    lines.append(f"{'#':<3} {'JOUEUR':<18} {'RATIO':>5}  {'FFA':>9}  {'TEAM':>9}")
+    lines.append("-" * 52)
     for i, p in enumerate(players[:30], 1):
-        embed.add_field(
-            name=f"#{i} {p['username']}",
-            value=(
-                f"Ratio: {p['ratio']:.2f}\n"
-                f"FFA: {p['wins_ffa']}W / {p['losses_ffa']}L\n"
-                f"TEAM: {p['wins_team']}W / {p['losses_team']}L"
-            ),
-            inline=False,
-        )
+        username = p["username"][:18]
+        ratio = f"{p['ratio']:.2f}"
+        ffa = f"{p['wins_ffa']}W/{p['losses_ffa']}L"
+        team = f"{p['wins_team']}W/{p['losses_team']}L"
+        lines.append(f"{i:<3} {username:<18} {ratio:>5}  {ffa:>9}  {team:>9}")
+
+    embed.description = "```\n" + "\n".join(lines) + "\n```"
+    embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     if last_updated:
-        embed.set_footer(text=f"Updated {last_updated}")
+        embed.set_footer(text=f"Mis à jour le {last_updated}")
 
     await interaction.response.send_message(embed=embed)
 
