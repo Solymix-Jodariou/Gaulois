@@ -44,6 +44,10 @@ def is_pseudo_valid(pseudo: str) -> bool:
     return "#" not in pseudo
 
 
+def has_clan_tag(pseudo: str) -> bool:
+    return CLAN_TAG.upper() in pseudo.upper()
+
+
 def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
     wins = wins_ffa + wins_team
     losses = losses_ffa + losses_team
@@ -86,6 +90,12 @@ async def register(interaction: discord.Interaction, pseudo: str, player_id: str
     if not is_pseudo_valid(pseudo):
         await interaction.response.send_message(
             "âŒ Le pseudo ne doit pas contenir de tag Discord (#).",
+            ephemeral=True,
+        )
+        return
+    if not has_clan_tag(pseudo):
+        await interaction.response.send_message(
+            f"âŒ Le pseudo doit contenir le tag {CLAN_TAG}.",
             ephemeral=True,
         )
         return
