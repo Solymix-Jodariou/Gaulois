@@ -10,6 +10,7 @@ from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
+VERSION = "2026-02-03-commands-sync-2"
 
 DB_PATH = "leaderboard.db"
 CLAN_TAG = os.getenv("CLAN_TAG", "GAL")
@@ -226,6 +227,7 @@ async def refresh_loop():
 async def on_ready():
     init_db()
     load_cache()
+    print(f"Bot version: {VERSION}")
     try:
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
