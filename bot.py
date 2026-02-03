@@ -1,8 +1,10 @@
 import discord
 from discord.ext import commands
 import aiohttp
+import aiomysql
 import json
 from datetime import datetime
+from urllib.parse import urlparse
 
 # Configuration
 import os
@@ -12,6 +14,9 @@ API_BASE = 'https://api.openfront.io'
 OPENFRONT_API_KEY = os.getenv('OPENFRONT_API_KEY')
 MAX_GAMES_DEFAULT = 10
 MAX_GAMES_CAP = 30
+
+db_pool = None
+db_initialized = False
 
 # Vérification du token
 if not TOKEN:
@@ -25,6 +30,156 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 registered_users = {}
 # Base de données simple (discord -> player_id openfront)
 registered_player_ids = {}
+
+def get_db_config():
+    """Récupère la config MySQL depuis Railway."""
+    mysql_url = os.getenv('MYSQL_URL') or os.getenv('DATABASE_URL')
+    if mysql_url:
+        parsed = urlparse(mysql_url)
+        return {
+            "host": parsed.hostname,
+            "port": parsed.port or 3306,
+            "user": parsed.username,
+            "password": parsed.password,
+            "db": parsed.path.lstrip('/'),
+        }
+
+    host = os.getenv('MYSQLHOST')
+    user = os.getenv('MYSQLUSER')
+    password = os.getenv('MYSQLPASSWORD')
+    db = os.getenv('MYSQLDATABASE')
+    port = int(os.getenv('MYSQLPORT') or 3306)
+
+    if host and user and db:
+        return {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "db": db,
+        }
+    return None
+
+async def init_db():
+    """Initialise le pool MySQL et crée les tables."""
+    global db_pool, db_initialized
+    if db_initialized:
+        return
+    db_initialized = True
+
+    config = get_db_config()
+    if not config:
+        print("⚠️ MySQL non configuré (variables Railway manquantes)")
+        return
+
+    db_pool = await aiomysql.create_pool(
+        host=config["host"],
+        port=config["port"],
+        user=config["user"],
+        password=config["password"],
+        db=config["db"],
+        autocommit=True,
+        minsize=1,
+        maxsize=5,
+    )
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_users (
+                    discord_id BIGINT PRIMARY KEY,
+                    openfront_username VARCHAR(64),
+                    player_id VARCHAR(64),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS player_stats_cache (
+                    player_id VARCHAR(64) PRIMARY KEY,
+                    data JSON NOT NULL,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+async def db_upsert_user(discord_id, openfront_username=None, player_id=None):
+    """Insère ou met à jour un utilisateur."""
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO discord_users (discord_id, openfront_username, player_id)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    openfront_username = COALESCE(VALUES(openfront_username), openfront_username),
+                    player_id = COALESCE(VALUES(player_id), player_id)
+                """,
+                (discord_id, openfront_username, player_id),
+            )
+
+async def db_get_user(discord_id):
+    """Récupère un utilisateur."""
+    if not db_pool:
+        return None
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT openfront_username, player_id FROM discord_users WHERE discord_id = %s",
+                (discord_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {"openfront_username": row[0], "player_id": row[1]}
+
+async def db_delete_user(discord_id):
+    """Supprime un utilisateur."""
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM discord_users WHERE discord_id = %s",
+                (discord_id,),
+            )
+
+async def db_save_player_stats(player_id, data):
+    """Enregistre les stats d'un joueur en cache."""
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO player_stats_cache (player_id, data)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE
+                    data = VALUES(data),
+                    fetched_at = CURRENT_TIMESTAMP
+                """,
+                (player_id, json.dumps(data)),
+            )
+
+async def db_get_player_stats(player_id):
+    """Récupère le cache des stats d'un joueur."""
+    if not db_pool:
+        return None
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT data, fetched_at FROM player_stats_cache WHERE player_id = %s",
+                (player_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {"data": row[0], "fetched_at": row[1]}
 
 # ==================== FONCTIONS API ====================
 
@@ -184,6 +339,7 @@ def get_metric_key(players):
 
 @bot.event
 async def on_ready():
+    await init_db()
     print(f'✅ Bot connecté : {bot.user.name}')
     print(f'🎯 Tag suivi : {TAG_CLAN}')
     print(f'📡 API : {API_BASE}')
@@ -259,6 +415,7 @@ async def register(ctx, pseudo: str = None):
         return
     
     registered_users[str(ctx.author.id)] = pseudo
+    await db_upsert_user(ctx.author.id, openfront_username=pseudo)
     await ctx.send(f"✅ {ctx.author.mention} enregistré avec le pseudo **{pseudo}**")
 
 @bot.command(name='register_id')
@@ -269,14 +426,25 @@ async def register_id(ctx, player_id: str = None):
         return
 
     registered_player_ids[str(ctx.author.id)] = player_id
+    await db_upsert_user(ctx.author.id, player_id=player_id)
     await ctx.send(f"✅ {ctx.author.mention} enregistré avec le Player ID **{player_id}**")
 
 @bot.command(name='unregister')
 async def unregister(ctx):
     """Supprime l'enregistrement"""
     user_id = str(ctx.author.id)
+    had_any = False
     if user_id in registered_users:
         del registered_users[user_id]
+        had_any = True
+    if user_id in registered_player_ids:
+        del registered_player_ids[user_id]
+        had_any = True
+    row = await db_get_user(ctx.author.id)
+    if row:
+        had_any = True
+    await db_delete_user(ctx.author.id)
+    if had_any:
         await ctx.send("✅ Enregistrement supprimé")
     else:
         await ctx.send("❌ Tu n'es pas enregistré")
@@ -285,27 +453,42 @@ async def unregister(ctx):
 async def myid(ctx):
     """Affiche le Player ID enregistré"""
     user_id = str(ctx.author.id)
-    if user_id in registered_player_ids:
-        player_id = registered_player_ids[user_id]
+    player_id = registered_player_ids.get(user_id)
+    if not player_id:
+        row = await db_get_user(ctx.author.id)
+        player_id = row["player_id"] if row else None
+        if player_id:
+            registered_player_ids[user_id] = player_id
+    if player_id:
         await ctx.send(f"🆔 Ton Player ID OpenFront : **{player_id}**")
-    else:
-        await ctx.send("❌ Tu n'as pas de Player ID enregistré. Utilise `!register_id <player_id>`")
+        return
+    await ctx.send("❌ Tu n'as pas de Player ID enregistré. Utilise `!register_id <player_id>`")
 
 @bot.command(name='myinfo')
 async def myinfo(ctx):
     """Affiche les infos de l'utilisateur"""
     user_id = str(ctx.author.id)
-    if user_id in registered_users:
-        pseudo = registered_users[user_id]
+    pseudo = registered_users.get(user_id)
+    if not pseudo:
+        row = await db_get_user(ctx.author.id)
+        pseudo = row["openfront_username"] if row else None
+        if pseudo:
+            registered_users[user_id] = pseudo
+    if pseudo:
         await ctx.send(f"📋 Ton pseudo Openfront : **{pseudo}**")
-    else:
-        await ctx.send("❌ Tu n'es pas enregistré. Utilise `!register <pseudo>`")
+        return
+    await ctx.send("❌ Tu n'es pas enregistré. Utilise `!register <pseudo>`")
 
 @bot.command(name='stats_id')
 async def stats_id(ctx, player_id: str = None):
     """Affiche les stats d'un Player ID"""
     if not player_id:
         player_id = registered_player_ids.get(str(ctx.author.id))
+        if not player_id:
+            row = await db_get_user(ctx.author.id)
+            player_id = row["player_id"] if row else None
+            if player_id:
+                registered_player_ids[str(ctx.author.id)] = player_id
         if not player_id:
             await ctx.send("❌ Usage : `!stats_id <player_id>` ou enregistre avec `!register_id`")
             return
@@ -314,8 +497,18 @@ async def stats_id(ctx, player_id: str = None):
 
     data, error = await get_player_data(player_id)
     if not data:
+        cached = await db_get_player_stats(player_id)
+        if cached:
+            cached_data = cached["data"]
+            if not isinstance(cached_data, str):
+                cached_data = json.dumps(cached_data, indent=2)
+            await ctx.send("⚠️ API inaccessible, voici le dernier cache disponible.")
+            await ctx.send(f"```json\n{cached_data[:1900]}\n```")
+            return
         await ctx.send(f"❌ Impossible de récupérer les stats. {format_api_error(error)}")
         return
+
+    await db_save_player_stats(player_id, data)
 
     json_str = json.dumps(data, indent=2)
     if len(json_str) > 1900:
