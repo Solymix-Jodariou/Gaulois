@@ -231,6 +231,9 @@ async def on_ready():
             guild = discord.Object(id=int(GUILD_ID))
             await bot.tree.sync(guild=guild)
             print(f"Commands synced for guild {GUILD_ID}")
+            # Sync global commands too to remove stale ones like /register
+            await bot.tree.sync()
+            print("Global commands synced")
         else:
             await bot.tree.sync()
             print("Commands synced globally")
@@ -239,6 +242,7 @@ async def on_ready():
 
     bot.loop.create_task(refresh_loop())
     print(f"Bot connected: {bot.user}")
+    print("Registered commands:", [c.name for c in bot.tree.get_commands()])
 
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
