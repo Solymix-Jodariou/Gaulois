@@ -27,7 +27,7 @@ MERGE_PREFIXES = [
 ]
 
 API_BASE = "https://api.openfront.io/public"
-USER_AGENT = "Mozilla/5.0 (GauloisBot)"
+USER_AGENT = "Mozilla/5.0 (GauloisBot/1.1)"
 OPENFRONT_API_KEY = os.getenv("OPENFRONT_API_KEY")
 ONEV1_LEADERBOARD_URL = os.getenv(
     "OPENFRONT_1V1_LEADERBOARD_URL",
