@@ -460,9 +460,7 @@ async def build_leaderboard_embed(guild, page: int, page_size: int):
     embed.description = (
         f"**Joueurs:** {total_players}  |  "
         f"**Wins:** {total_wins}  |  "
-        f"**Losses:** {total_losses}  |  "
-        f"**Min games:** {MIN_GAMES}  |  "
-        f"**Score:** ratio*{SCORE_RATIO_WEIGHT} + games*{SCORE_GAMES_WEIGHT}"
+        f"**Losses:** {total_losses}"
     )
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
