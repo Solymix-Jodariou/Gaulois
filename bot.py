@@ -255,7 +255,8 @@ async def load_leaderboard():
     last_updated = None
     for row in rows:
         raw_name = row[1] or row[0]
-        key = normalize_username(raw_name).upper()
+        base = normalize_username(raw_name)
+        key = re.sub(r"\s+", "", base).upper()
         if not key:
             continue
         entry = aggregated.setdefault(
@@ -277,6 +278,33 @@ async def load_leaderboard():
             entry["updated_at"] = row[6]
         if row[6] and (last_updated is None or row[6] > last_updated):
             last_updated = row[6]
+
+    # Merge keys where one is a prefix of another (helps with small name variants)
+    min_prefix = int(os.getenv("LEADERBOARD_MERGE_PREFIX_MIN", "6"))
+    max_diff = int(os.getenv("LEADERBOARD_MERGE_MAX_DIFF", "6"))
+    if min_prefix < 3:
+        min_prefix = 3
+    if max_diff < 1:
+        max_diff = 1
+
+    keys_sorted = sorted(aggregated.keys(), key=len)
+    for base_key in keys_sorted:
+        if base_key not in aggregated:
+            continue
+        if len(base_key) < min_prefix:
+            continue
+        for other_key in list(aggregated.keys()):
+            if other_key == base_key:
+                continue
+            if other_key.startswith(base_key) and 0 < (len(other_key) - len(base_key)) <= max_diff:
+                src = aggregated.pop(other_key)
+                dst = aggregated[base_key]
+                dst["wins_ffa"] += src["wins_ffa"]
+                dst["losses_ffa"] += src["losses_ffa"]
+                dst["wins_team"] += src["wins_team"]
+                dst["losses_team"] += src["losses_team"]
+                if src.get("updated_at") and (dst.get("updated_at") is None or src["updated_at"] > dst["updated_at"]):
+                    dst["updated_at"] = src["updated_at"]
 
     players = []
     for key, entry in aggregated.items():
