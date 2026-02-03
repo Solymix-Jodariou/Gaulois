@@ -27,6 +27,7 @@ RANGE_HOURS = int(os.getenv("LEADERBOARD_RANGE_HOURS", "24"))
 MAX_SESSIONS = int(os.getenv("LEADERBOARD_MAX_SESSIONS", "300"))
 BACKFILL_START = os.getenv("LEADERBOARD_BACKFILL_START", "2026-01-01T00:00:00Z")
 BACKFILL_INTERVAL_MINUTES = int(os.getenv("LEADERBOARD_BACKFILL_INTERVAL_MINUTES", "5"))
+MIN_GAMES = int(os.getenv("LEADERBOARD_MIN_GAMES", "5"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -40,6 +41,8 @@ if MAX_SESSIONS > 1000:
     MAX_SESSIONS = 1000
 if BACKFILL_INTERVAL_MINUTES < 5:
     BACKFILL_INTERVAL_MINUTES = 5
+if MIN_GAMES < 1:
+    MIN_GAMES = 1
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -50,7 +53,10 @@ pool = None
 def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
     wins = wins_ffa + wins_team
     losses = losses_ffa + losses_team
-    return wins / (losses + 1)
+    total = wins + losses
+    if total == 0:
+        return 0.0
+    return wins / total
 
 
 def is_clan_username(username: str) -> bool:
@@ -218,6 +224,8 @@ async def load_leaderboard():
     for row in rows:
         ratio = calculate_ratio(row[1], row[2], row[3], row[4])
         total_wins = row[1] + row[3]
+        total_losses = row[2] + row[4]
+        total_games = total_wins + total_losses
         players.append(
             {
                 "username": row[0],
@@ -227,11 +235,20 @@ async def load_leaderboard():
                 "losses_team": row[4],
                 "ratio": ratio,
                 "total_wins": total_wins,
+                "total_games": total_games,
             }
         )
         if row[5]:
             last_updated = row[5]
-    players.sort(key=lambda p: (p["ratio"], p["total_wins"]), reverse=True)
+    players.sort(
+        key=lambda p: (
+            p["total_games"] >= MIN_GAMES,
+            p["ratio"],
+            p["total_wins"],
+            p["total_games"],
+        ),
+        reverse=True,
+    )
     return players, last_updated
 
 
@@ -443,7 +460,8 @@ async def setleaderboard(interaction: discord.Interaction):
     embed.description = (
         f"**Joueurs:** {total_players}  |  "
         f"**Wins:** {total_wins}  |  "
-        f"**Losses:** {total_losses}"
+        f"**Losses:** {total_losses}  |  "
+        f"**Min games:** {MIN_GAMES}"
     )
     if interaction.guild and interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
@@ -451,12 +469,13 @@ async def setleaderboard(interaction: discord.Interaction):
     medals = ["🥇", "🥈", "🥉"]
     for idx, p in enumerate(top[:3]):
         ratio = f"{p['ratio']:.2f}"
+        total_games = p["total_games"]
         embed.add_field(
             name=f"{medals[idx]} {p['username']}",
             value=(
                 f"Ratio: **{ratio}**\n"
-                f"FFA: `{p['wins_ffa']}W / {p['losses_ffa']}L`\n"
-                f"TEAM: `{p['wins_team']}W / {p['losses_team']}L`"
+                f"TEAM: `{p['wins_team']}W / {p['losses_team']}L`\n"
+                f"GAMES: `{total_games}`"
             ),
             inline=False,
         )
@@ -464,12 +483,12 @@ async def setleaderboard(interaction: discord.Interaction):
     def format_line(rank, player):
         username = player["username"][:14]
         ratio = f"{player['ratio']:.2f}"
-        ffa = f"{player['wins_ffa']}W/{player['losses_ffa']}L"
         team = f"{player['wins_team']}W/{player['losses_team']}L"
-        return f"{rank:<3} {username:<14} {ratio:>5}  {ffa:>7}  {team:>7}"
+        games = f"{player['total_games']}"
+        return f"{rank:<3} {username:<14} {ratio:>5}  {team:>7}  {games:>3}"
 
-    header = f"{'#':<3} {'JOUEUR':<14} {'RATIO':>5}  {'FFA':>7}  {'TEAM':>7}"
-    sep = "-" * 44
+    header = f"{'#':<3} {'JOUEUR':<14} {'RATIO':>5}  {'TEAM':>7}  {'G':>3}"
+    sep = "-" * 40
 
     col1 = [header, sep]
     col2 = [header, sep]
