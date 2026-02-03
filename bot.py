@@ -424,18 +424,35 @@ async def clear_leaderboard_message(guild_id: int):
         )
 
 
-async def build_leaderboard_embed(guild):
+def get_total_pages(total_items, page_size):
+    if total_items <= 0:
+        return 1
+    return (total_items + page_size - 1) // page_size
+
+
+async def get_top_players():
     players, last_updated = await load_leaderboard()
     if not players:
+        return [], None
+    filtered = [p for p in players if p["total_games"] >= MIN_GAMES]
+    return filtered[:100], last_updated
+
+
+async def build_leaderboard_embed(guild, page: int, page_size: int):
+    top, last_updated = await get_top_players()
+    if not top:
         return None
 
+    total_pages = get_total_pages(len(top), page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = top[start:end]
+
     embed = discord.Embed(
-        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 100",
+        title=f"🏆 Leaderboard {CLAN_DISPLAY} — Page {page}/{total_pages}",
         color=discord.Color.orange(),
     )
-
-    filtered = [p for p in players if p["total_games"] >= MIN_GAMES]
-    top = filtered[:100]
     total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
     total_losses = sum(p["losses_ffa"] + p["losses_team"] for p in top)
     total_players = len(top)
@@ -450,7 +467,7 @@ async def build_leaderboard_embed(guild):
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    name_width = 14
+    name_width = 16
 
     def truncate_name(name: str) -> str:
         if len(name) <= name_width:
@@ -458,7 +475,7 @@ async def build_leaderboard_embed(guild):
         return name[: name_width - 3] + "..."
 
     truncated_counts = {}
-    for p in top[3:]:
+    for p in page_items:
         t = truncate_name(p["display_name"])
         truncated_counts[t] = truncated_counts.get(t, 0) + 1
 
@@ -480,42 +497,10 @@ async def build_leaderboard_embed(guild):
 
     header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'TEAM':>7} {'G':>3}"
     sep = "-" * (name_width + 22)
-
-    col_top = [header, sep]
-    col1 = [header, sep]
-    col2 = [header, sep]
-    col3 = [header, sep]
-    col4 = [header, sep]
-    col5 = [header, sep]
-
-    # Top 1-3 in same table style
-    for i, p in enumerate(top[:3], 1):
-        col_top.append(format_line(i, p))
-
-    for i, p in enumerate(top[3:], 4):
-        if i <= 23:
-            col1.append(format_line(i, p))
-        elif i <= 43:
-            col2.append(format_line(i, p))
-        elif i <= 63:
-            col3.append(format_line(i, p))
-        elif i <= 83:
-            col4.append(format_line(i, p))
-        else:
-            col5.append(format_line(i, p))
-
-    if len(col_top) > 2:
-        embed.add_field(name="Top 1-3", value="```\n" + "\n".join(col_top) + "\n```", inline=False)
-    if len(col1) > 2:
-        embed.add_field(name="Top 4-23", value="```\n" + "\n".join(col1) + "\n```", inline=False)
-    if len(col2) > 2:
-        embed.add_field(name="Top 24-43", value="```\n" + "\n".join(col2) + "\n```", inline=False)
-    if len(col3) > 2:
-        embed.add_field(name="Top 44-63", value="```\n" + "\n".join(col3) + "\n```", inline=False)
-    if len(col4) > 2:
-        embed.add_field(name="Top 64-83", value="```\n" + "\n".join(col4) + "\n```", inline=False)
-    if len(col5) > 2:
-        embed.add_field(name="Top 84-100", value="```\n" + "\n".join(col5) + "\n```", inline=False)
+    table = [header, sep]
+    for i, p in enumerate(page_items, start + 1):
+        table.append(format_line(i, p))
+    embed.add_field(name="Classement", value="```\n" + "\n".join(table) + "\n```", inline=False)
 
     if last_updated:
         try:
@@ -527,6 +512,34 @@ async def build_leaderboard_embed(guild):
         embed.set_footer(text=footer)
 
     return embed
+
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, page: int, page_size: int):
+        super().__init__(timeout=None)
+        self.page = page
+        self.page_size = page_size
+
+    async def update(self, interaction: discord.Interaction, page: int):
+        embed = await build_leaderboard_embed(interaction.guild, page, self.page_size)
+        if not embed:
+            await interaction.response.send_message(
+                f"No data for {CLAN_DISPLAY}. Wait for refresh.",
+                ephemeral=True,
+            )
+            return
+        self.page = page
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
+    async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.update(interaction, max(1, self.page - 1))
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="lb_next")
+    async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        top, _ = await get_top_players()
+        total_pages = get_total_pages(len(top), self.page_size)
+        await self.update(interaction, min(total_pages, self.page + 1))
 
 
 async def update_leaderboard_message():
@@ -541,9 +554,9 @@ async def update_leaderboard_message():
         try:
             channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             message = await channel.fetch_message(message_id)
-            embed = await build_leaderboard_embed(guild)
+            embed = await build_leaderboard_embed(guild, 1, 20)
             if embed:
-                await message.edit(embed=embed)
+                await message.edit(embed=embed, view=LeaderboardView(1, 20))
         except Exception:
             await clear_leaderboard_message(guild.id)
 
@@ -608,7 +621,7 @@ def process_game(info, clan_has_won):
         elif is_team:
             if clan_has_won:
                 asyncio.create_task(upsert_player(username_key, display_name, 0, 0, 1, 0))
-    else:
+            else:
                 asyncio.create_task(upsert_player(username_key, display_name, 0, 0, 0, 1))
 
 
@@ -734,6 +747,7 @@ async def on_ready():
     except Exception as exc:
         print(f"Command sync error: {exc}")
 
+    bot.add_view(LeaderboardView(1, 20))
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
     print(f"Bot connected: {bot.user}")
@@ -753,7 +767,7 @@ async def setleaderboard(interaction: discord.Interaction):
         )
         return
 
-    embed = await build_leaderboard_embed(interaction.guild)
+    embed = await build_leaderboard_embed(interaction.guild, 1, 20)
     if not embed:
         await interaction.response.send_message(
             f"No data for {CLAN_DISPLAY}. Wait for refresh.",
@@ -761,7 +775,7 @@ async def setleaderboard(interaction: discord.Interaction):
         )
         return
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, view=LeaderboardView(1, 20))
     message = await interaction.original_response()
     await set_leaderboard_message(interaction.guild.id, interaction.channel_id, message.id)
 
