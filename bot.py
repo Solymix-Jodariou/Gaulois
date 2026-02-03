@@ -20,6 +20,8 @@ USER_AGENT = "Mozilla/5.0 (GauloisBot)"
 
 REFRESH_MINUTES = int(os.getenv("LEADERBOARD_REFRESH_MINUTES", "30"))
 RANGE_HOURS = int(os.getenv("LEADERBOARD_RANGE_HOURS", "24"))
+MAX_GAMES = int(os.getenv("LEADERBOARD_MAX_GAMES", "300"))
+GAME_TYPE = os.getenv("LEADERBOARD_GAME_TYPE", "Public")
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -27,12 +29,21 @@ if RANGE_HOURS < 1:
     RANGE_HOURS = 1
 if REFRESH_MINUTES < 5:
     REFRESH_MINUTES = 5
+if MAX_GAMES < 10:
+    MAX_GAMES = 10
+if MAX_GAMES > 1000:
+    MAX_GAMES = 1000
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 leaderboard_cache = []
 leaderboard_updated_at = None
+leaderboard_meta = {
+    "games_scanned": 0,
+    "games_with_winner": 0,
+    "players_count": 0,
+}
 
 
 def get_db():
@@ -46,34 +57,37 @@ def init_db():
             CREATE TABLE IF NOT EXISTS clan_cache (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 data TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                meta TEXT NOT NULL
             )
             """
         )
 
 
 def load_cache():
-    global leaderboard_cache, leaderboard_updated_at
+    global leaderboard_cache, leaderboard_updated_at, leaderboard_meta
     with get_db() as conn:
         row = conn.execute(
-            "SELECT data, updated_at FROM clan_cache WHERE id = 1"
+            "SELECT data, updated_at, meta FROM clan_cache WHERE id = 1"
         ).fetchone()
     if row:
         leaderboard_cache = json.loads(row[0])
         leaderboard_updated_at = row[1]
+        leaderboard_meta = json.loads(row[2])
 
 
-def save_cache(data, updated_at):
+def save_cache(data, updated_at, meta):
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO clan_cache (id, data, updated_at)
-            VALUES (1, ?, ?)
+            INSERT INTO clan_cache (id, data, updated_at, meta)
+            VALUES (1, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 data = excluded.data,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                meta = excluded.meta
             """,
-            (json.dumps(data), updated_at),
+            (json.dumps(data), updated_at, json.dumps(meta)),
         )
 
 
@@ -83,36 +97,65 @@ def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
     return wins / (losses + 1)
 
 
-def is_clan_session(session):
-    tag = session.get("clanTag")
-    if not tag:
+def is_clan_username(username: str) -> bool:
+    if not username:
         return False
-    return tag.upper() == CLAN_TAG.upper()
+    upper = username.upper()
+    tag = CLAN_TAG.upper()
+    return f"[{tag}]" in upper or upper.startswith(f"{tag} ")
 
 
-def compute_from_sessions(sessions):
+def extract_winner_client_ids(info):
+    winner = info.get("winner")
+    if not winner or not isinstance(winner, list):
+        return set()
+    if len(winner) < 2:
+        return set()
+    if winner[0] == "team" and len(winner) >= 3:
+        return set(winner[2:])
+    if winner[0] == "player" and len(winner) >= 3:
+        return {winner[2]}
+    return set()
+
+
+def game_mode(info):
+    return (info.get("config", {}) or {}).get("gameMode") or ""
+
+
+def compute_from_games(games):
     players = {}
-    for s in sessions:
-        if not is_clan_session(s):
-            continue
-        username = s.get("username") or "Unknown"
-        entry = players.setdefault(
-            username,
-            {"wins_ffa": 0, "losses_ffa": 0, "wins_team": 0, "losses_team": 0},
-        )
+    games_with_winner = 0
 
-        mode = (s.get("gameMode") or "").lower()
-        has_won = bool(s.get("hasWon"))
-        if "free for all" in mode or mode == "ffa":
-            if has_won:
-                entry["wins_ffa"] += 1
-            else:
-                entry["losses_ffa"] += 1
-        elif "team" in mode:
-            if has_won:
-                entry["wins_team"] += 1
-            else:
-                entry["losses_team"] += 1
+    for info in games:
+        mode = game_mode(info).lower()
+        winners = extract_winner_client_ids(info)
+        if winners:
+            games_with_winner += 1
+
+        for p in info.get("players", []):
+            username = p.get("username") or ""
+            if not is_clan_username(username):
+                continue
+
+            entry = players.setdefault(
+                username,
+                {"wins_ffa": 0, "losses_ffa": 0, "wins_team": 0, "losses_team": 0},
+            )
+
+            client_id = p.get("clientID")
+            if not winners:
+                continue
+
+            if "free for all" in mode or mode == "ffa":
+                if client_id in winners:
+                    entry["wins_ffa"] += 1
+                else:
+                    entry["losses_ffa"] += 1
+            elif "team" in mode:
+                if client_id in winners:
+                    entry["wins_team"] += 1
+                else:
+                    entry["losses_team"] += 1
 
     results = []
     for username, stats in players.items():
@@ -125,7 +168,7 @@ def compute_from_sessions(sessions):
         total_wins = stats["wins_ffa"] + stats["wins_team"]
         results.append(
             {
-                "pseudo": f"{username}{CLAN_DISPLAY}",
+                "pseudo": username,
                 "wins_ffa": stats["wins_ffa"],
                 "losses_ffa": stats["losses_ffa"],
                 "wins_team": stats["wins_team"],
@@ -136,32 +179,81 @@ def compute_from_sessions(sessions):
         )
 
     results.sort(key=lambda p: (p["ratio"], p["total_wins"]), reverse=True)
-    return results
+    return results, games_with_winner
 
 
-async def fetch_clan_sessions(start_iso, end_iso):
-    url = f"{API_BASE}/clan/{CLAN_TAG}/sessions"
-    params = {"start": start_iso, "end": end_iso}
+async def fetch_games(start_iso, end_iso):
+    url = f"{API_BASE}/games"
+    headers = {"User-Agent": USER_AGENT}
+    games = []
+    offset = 0
+    limit = 200
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        while len(games) < MAX_GAMES:
+            params = {
+                "start": start_iso,
+                "end": end_iso,
+                "limit": min(limit, MAX_GAMES - len(games)),
+                "offset": offset,
+            }
+            if GAME_TYPE:
+                params["type"] = GAME_TYPE
+
+            async with session.get(url, params=params, timeout=20) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+                batch = await resp.json()
+
+            if not batch:
+                break
+
+            games.extend(batch)
+            offset += len(batch)
+
+    return games
+
+
+async def fetch_game_info(game_id):
+    url = f"{API_BASE}/game/{game_id}"
     headers = {"User-Agent": USER_AGENT}
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(url, params=params, timeout=20) as resp:
+        async with session.get(url, params={"turns": "false"}, timeout=25) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
-            return await resp.json()
+            data = await resp.json()
+            return data.get("info", {})
 
 
 async def refresh_leaderboard():
-    global leaderboard_cache, leaderboard_updated_at
+    global leaderboard_cache, leaderboard_updated_at, leaderboard_meta
+
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(hours=RANGE_HOURS)
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    sessions = await fetch_clan_sessions(start_iso, end_iso)
-    leaderboard_cache = compute_from_sessions(sessions)
+    games = await fetch_games(start_iso, end_iso)
+    game_ids = [g.get("game") for g in games if g.get("game")]
+
+    infos = []
+    for gid in game_ids:
+        try:
+            info = await fetch_game_info(gid)
+            infos.append(info)
+        except Exception:
+            continue
+
+    leaderboard_cache, games_with_winner = compute_from_games(infos)
     leaderboard_updated_at = end_dt.strftime("%Y-%m-%d %H:%M UTC")
-    save_cache(leaderboard_cache, leaderboard_updated_at)
+    leaderboard_meta = {
+        "games_scanned": len(game_ids),
+        "games_with_winner": games_with_winner,
+        "players_count": len(leaderboard_cache),
+    }
+    save_cache(leaderboard_cache, leaderboard_updated_at, leaderboard_meta)
 
 
 async def refresh_loop():
@@ -193,18 +285,17 @@ async def on_ready():
     print(f"Bot connected: {bot.user}")
 
 
-@bot.tree.command(name="setleaderboard", description="Show the [GAL] leaderboard.")
+@bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
 async def setleaderboard(interaction: discord.Interaction):
     if not leaderboard_cache:
         await interaction.response.send_message(
-            f"Aucun joueur avec le tag {CLAN_DISPLAY} trouve. "
-            f"Essaie d'augmenter la periode (LEADERBOARD_RANGE_HOURS) ou attends le prochain refresh.",
+            f"No data for {CLAN_DISPLAY}. Wait for refresh or increase range.",
             ephemeral=True,
         )
         return
 
     embed = discord.Embed(
-        title="Leaderboard [GAL] - Top 30",
+        title=f"Leaderboard {CLAN_DISPLAY} - Top 30",
         color=discord.Color.orange(),
     )
 
@@ -220,12 +311,18 @@ async def setleaderboard(interaction: discord.Interaction):
         )
 
     if leaderboard_updated_at:
-        embed.set_footer(text=f"Updated {leaderboard_updated_at}")
+        embed.set_footer(
+            text=(
+                f"Updated {leaderboard_updated_at} | "
+                f"Games: {leaderboard_meta['games_scanned']} | "
+                f"With winner: {leaderboard_meta['games_with_winner']}"
+            )
+        )
 
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="debug_api", description="Debug API OpenFront pour le clan.")
+@bot.tree.command(name="debug_api", description="Debug OpenFront API.")
 async def debug_api(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     end_dt = datetime.now(timezone.utc)
@@ -234,21 +331,20 @@ async def debug_api(interaction: discord.Interaction):
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        sessions = await fetch_clan_sessions(start_iso, end_iso)
-        total = len(sessions)
-        sample = sessions[0] if total > 0 else None
+        games = await fetch_games(start_iso, end_iso)
+        count_games = len(games)
+        first_game = games[0].get("game") if count_games > 0 else None
         msg = (
             f"OK\n"
             f"Tag: {CLAN_TAG}\n"
-            f"Plage: {start_iso} -> {end_iso}\n"
-            f"Sessions: {total}\n"
+            f"Range: {start_iso} -> {end_iso}\n"
+            f"Games fetched: {count_games}\n"
+            f"First game: {first_game}\n"
         )
-        if sample:
-            msg += f"Exemple: {sample}"
         await interaction.followup.send(msg, ephemeral=True)
     except Exception as exc:
         await interaction.followup.send(
-            f"Erreur API: {exc}\nTag: {CLAN_TAG}\nPlage: {start_iso} -> {end_iso}",
+            f"API error: {exc}\nTag: {CLAN_TAG}\nRange: {start_iso} -> {end_iso}",
             ephemeral=True,
         )
 
