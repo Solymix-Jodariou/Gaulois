@@ -901,20 +901,47 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    lines = []
-    for i, p in enumerate(page_items, start + 1):
-        name = p.get("name") or "Unknown"
-        elo = p.get("elo")
-        games = p.get("games", 0)
-        ratio_pct = p.get("ratio_pct")
-        is_gal = is_clan_username(name)
-        if is_gal:
-            name = f"**{name}**"
-        elo_text = f"ELO {int(elo)}" if isinstance(elo, (int, float)) else "ELO ?"
-        ratio_text = f"{ratio_pct:.1f}%" if isinstance(ratio_pct, (int, float)) else "?"
-        lines.append(f"{i}. {name} — {elo_text} | {games} games | {ratio_text}")
+    name_width = 16
 
-    embed.add_field(name="Classement 1v1", value="\n".join(lines), inline=False)
+    def truncate_name(name: str) -> str:
+        if len(name) <= name_width:
+            return name
+        return name[: name_width - 3] + "..."
+
+    truncated_counts = {}
+    for p in page_items:
+        t = truncate_name(p.get("name") or "Unknown")
+        truncated_counts[t] = truncated_counts.get(t, 0) + 1
+
+    def format_table_name(player):
+        raw_name = player.get("name") or "Unknown"
+        name = truncate_name(raw_name)
+        if truncated_counts.get(name, 0) > 1 and len(raw_name) >= 3:
+            suffix = raw_name[-3:]
+            base = raw_name[: name_width - 4] if len(raw_name) >= name_width - 3 else raw_name
+            name = base[: name_width - 4] + "+" + suffix
+        if is_clan_username(raw_name):
+            if len(name) >= name_width:
+                name = name[: name_width - 1]
+            name = f"★{name}"
+        return name
+
+    def format_line(rank, player):
+        username = format_table_name(player)
+        elo = player.get("elo")
+        elo_text = f"{int(elo)}" if isinstance(elo, (int, float)) else "?"
+        games = f"{player.get('games', 0)}"
+        ratio_pct = player.get("ratio_pct")
+        ratio_text = f"{ratio_pct:.1f}%" if isinstance(ratio_pct, (int, float)) else "?"
+        return f"{rank:<3} {username:<{name_width}} {elo_text:>5}  {games:>5}  {ratio_text:>6}"
+
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'ELO':>5} {'GAMES':>5} {'RATIO':>6}"
+    sep = "-" * (name_width + 24)
+    table = [header, sep]
+    for i, p in enumerate(page_items, start + 1):
+        table.append(format_line(i, p))
+
+    embed.add_field(name="Classement 1v1", value="```\n" + "\n".join(table) + "\n```", inline=False)
 
     if last_updated:
         try:
