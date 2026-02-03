@@ -225,6 +225,34 @@ async def setleaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="debug_api", description="Debug API OpenFront pour le clan.")
+async def debug_api(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(hours=RANGE_HOURS)
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        sessions = await fetch_clan_sessions(start_iso, end_iso)
+        total = len(sessions)
+        sample = sessions[0] if total > 0 else None
+        msg = (
+            f"OK\n"
+            f"Tag: {CLAN_TAG}\n"
+            f"Plage: {start_iso} -> {end_iso}\n"
+            f"Sessions: {total}\n"
+        )
+        if sample:
+            msg += f"Exemple: {sample}"
+        await interaction.followup.send(msg, ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(
+            f"Erreur API: {exc}\nTag: {CLAN_TAG}\nPlage: {start_iso} -> {end_iso}",
+            ephemeral=True,
+        )
+
+
 if __name__ == "__main__":
     if not TOKEN:
         raise ValueError("DISCORD_TOKEN missing.")
