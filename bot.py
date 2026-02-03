@@ -19,6 +19,7 @@ DB_URL = (
 
 CLAN_TAG = os.getenv("CLAN_TAG", "GAL")
 CLAN_DISPLAY = f"[{CLAN_TAG}]"
+MERGE_PREFIXES = [p.strip().upper() for p in os.getenv("LEADERBOARD_MERGE_PREFIXES", "PRINCE").split(",") if p.strip()]
 
 API_BASE = "https://api.openfront.io/public"
 USER_AGENT = "Mozilla/5.0 (GauloisBot)"
@@ -92,6 +93,16 @@ def build_display_name(raw: str) -> str:
     if not base:
         return CLAN_DISPLAY
     return f"{CLAN_DISPLAY} {base}"
+
+
+def merge_prefix_key(base_name: str):
+    if not base_name:
+        return None
+    upper = base_name.upper()
+    for prefix in MERGE_PREFIXES:
+        if upper.startswith(prefix):
+            return prefix
+    return None
 
 
 async def init_db():
@@ -256,13 +267,17 @@ async def load_leaderboard():
     for row in rows:
         raw_name = row[1] or row[0]
         base = normalize_username(raw_name)
-        key = re.sub(r"\s+", "", base).upper()
+        merged_prefix = merge_prefix_key(base)
+        if merged_prefix:
+            key = merged_prefix
+        else:
+            key = re.sub(r"\s+", "", base).upper()
         if not key:
             continue
         entry = aggregated.setdefault(
             key,
             {
-                "display_name": build_display_name(raw_name),
+                "display_name": f"{CLAN_DISPLAY} {merged_prefix.title()}" if merged_prefix else build_display_name(raw_name),
                 "wins_ffa": 0,
                 "losses_ffa": 0,
                 "wins_team": 0,
