@@ -9,6 +9,9 @@ import os
 TOKEN = os.getenv('DISCORD_TOKEN')  # prend la variable d'environnement
 TAG_CLAN = 'GAL'
 API_BASE = 'https://api.openfront.io'
+OPENFRONT_API_KEY = os.getenv('OPENFRONT_API_KEY')
+MAX_GAMES_DEFAULT = 10
+MAX_GAMES_CAP = 30
 
 # Vérification du token
 if not TOKEN:
@@ -23,29 +26,81 @@ registered_users = {}
 
 # ==================== FONCTIONS API ====================
 
+def build_api_headers():
+    """Construit les headers pour l'API (si clé fournie)."""
+    if not OPENFRONT_API_KEY:
+        return {}
+    # Compatibilité : certaines APIs utilisent Authorization, d'autres X-API-Key
+    return {
+        "Authorization": f"Bearer {OPENFRONT_API_KEY}",
+        "X-API-Key": OPENFRONT_API_KEY,
+    }
+
+def format_api_error(error: str) -> str:
+    if not error:
+        return ""
+    if "401" in error:
+        return "Accès refusé (401). L'API semble privée : configure `OPENFRONT_API_KEY`."
+    if "404" in error:
+        return "Endpoint introuvable (404). L'API a peut-être changé."
+    return f"Erreur API : {error}"
+
 async def get_leaderboard():
     """Récupère le leaderboard complet"""
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(f'{API_BASE}/leaderboard') as resp:
+            async with session.get(
+                f'{API_BASE}/leaderboard',
+                headers=build_api_headers(),
+                timeout=10,
+            ) as resp:
                 if resp.status == 200:
-                    return await resp.json()
-                return None
+                    return await resp.json(), None
+                text = await resp.text()
+                return None, f"HTTP {resp.status}: {text[:200]}"
         except Exception as e:
             print(f"❌ Erreur API leaderboard: {e}")
-            return None
+            return None, str(e)
+
+async def get_recent_games():
+    """Récupère une liste de parties récentes (ids)."""
+    endpoints_to_try = [
+        "games",
+        "games/recent",
+        "matches",
+    ]
+    async with aiohttp.ClientSession() as session:
+        for endpoint in endpoints_to_try:
+            try:
+                async with session.get(
+                    f'{API_BASE}/{endpoint}',
+                    headers=build_api_headers(),
+                    timeout=10,
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json(), None
+                    text = await resp.text()
+                    last_error = f"HTTP {resp.status}: {text[:200]}"
+            except Exception as e:
+                last_error = str(e)
+        return None, last_error
 
 async def get_game_data(game_id):
     """Récupère les données d'une partie"""
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(f'{API_BASE}/game/{game_id}') as resp:
+            async with session.get(
+                f'{API_BASE}/game/{game_id}',
+                headers=build_api_headers(),
+                timeout=10,
+            ) as resp:
                 if resp.status == 200:
-                    return await resp.json()
-                return None
+                    return await resp.json(), None
+                text = await resp.text()
+                return None, f"HTTP {resp.status}: {text[:200]}"
         except Exception as e:
             print(f"❌ Erreur API game: {e}")
-            return None
+            return None, str(e)
 
 def get_clan_stats(leaderboard_data, clan_tag):
     """Extrait les stats d'un clan du leaderboard"""
@@ -66,6 +121,26 @@ def is_tagged_user(username: str, tag: str) -> bool:
     upper_name = username.upper()
     upper_tag = tag.upper()
     return f'[{upper_tag}]' in upper_name or upper_name.startswith(f'{upper_tag} ')
+
+def extract_game_id(item):
+    """Extrait un identifiant de partie d'un objet API."""
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return None
+    for key in ("gameId", "game_id", "id", "_id"):
+        value = item.get(key)
+        if value:
+            return value
+    return None
+
+def get_metric_key(players):
+    """Trouve une stat numérique utilisable pour trier un leaderboard."""
+    metric_keys = ("score", "kills", "wins", "points", "territory", "land", "power")
+    for key in metric_keys:
+        if any(isinstance(p.get(key), (int, float)) for p in players):
+            return key
+    return None
 
 # ==================== COMMANDES ====================
 
@@ -105,8 +180,8 @@ async def help_command(ctx):
         inline=False
     )
     embed.add_field(
-        name="!leaderboard_clans [top]",
-        value="Affiche le classement des clans (défaut: top 10)",
+        name="!leaderboard_clans [max_games] [top]",
+        value="Scanne des parties récentes et affiche le top [GAL]",
         inline=False
     )
     embed.add_field(
@@ -153,9 +228,9 @@ async def stats_gal(ctx):
     """Affiche les stats du clan GAL"""
     await ctx.send("🔄 Récupération des stats...")
     
-    data = await get_leaderboard()
+    data, error = await get_leaderboard()
     if not data:
-        await ctx.send("❌ Impossible de récupérer les données du leaderboard")
+        await ctx.send(f"❌ Impossible de récupérer les données du leaderboard. {format_api_error(error)}")
         return
     
     clan_stats = get_clan_stats(data, TAG_CLAN)
@@ -186,53 +261,104 @@ async def stats_gal(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name='leaderboard_clans')
-async def leaderboard_clans(ctx, top: int = 10):
-    """Affiche le leaderboard des joueurs portant le tag clan"""
-    await ctx.send(f"🔄 Récupération du top {top} joueurs [{TAG_CLAN}]...")
-    
-    data = await get_leaderboard()
-    if not data:
-        await ctx.send("❌ Impossible de récupérer le leaderboard")
+async def leaderboard_clans(ctx, max_games: int = MAX_GAMES_DEFAULT, top: int = 10):
+    """Scanne les parties récentes et affiche le top GAL"""
+    if max_games < 1:
+        await ctx.send("❌ Usage : `!leaderboard_clans [max_games] [top]`")
         return
 
-    players = data.get('players')
-    if not players:
-        await ctx.send(
-            "❌ Le leaderboard ne fournit pas la liste des joueurs. "
-            "L'API renvoie seulement les clans."
-        )
+    max_games = min(max_games, MAX_GAMES_CAP)
+    await ctx.send(f"🔄 Scan de {max_games} parties récentes pour le tag [{TAG_CLAN}]...")
+
+    recent_data, error = await get_recent_games()
+    if not recent_data:
+        await ctx.send(f"❌ Impossible de récupérer les parties récentes. {format_api_error(error)}")
         return
 
-    gal_players = [p for p in players if is_tagged_user(p.get('username', ''), TAG_CLAN)]
-    if not gal_players:
-        await ctx.send(f"❌ Aucun joueur **{TAG_CLAN}** trouvé dans le leaderboard")
+    if isinstance(recent_data, dict):
+        game_items = recent_data.get('games') or recent_data.get('matches') or recent_data.get('data')
+    else:
+        game_items = recent_data
+
+    if not game_items:
+        await ctx.send("❌ Liste des parties récentes introuvable")
         return
 
-    def sort_key(player):
-        return player.get('weightedWLRatio', player.get('wins', player.get('games', 0)))
+    game_ids = []
+    for item in game_items:
+        game_id = extract_game_id(item)
+        if game_id:
+            game_ids.append(game_id)
+        if len(game_ids) >= max_games:
+            break
 
-    gal_players_sorted = sorted(gal_players, key=sort_key, reverse=True)[:top]
+    if not game_ids:
+        await ctx.send("❌ Aucun game_id trouvé dans les parties récentes")
+        return
+
+    leaderboard = {}
+    games_with_gal = 0
+
+    for game_id in game_ids:
+        data, _error = await get_game_data(game_id)
+        if not data:
+            continue
+
+        players = None
+        if isinstance(data, dict):
+            players = data.get('info', {}).get('players') or data.get('players')
+
+        if not players:
+            continue
+
+        gal_players = [p for p in players if is_tagged_user(p.get('username', ''), TAG_CLAN)]
+        if not gal_players:
+            continue
+
+        games_with_gal += 1
+        metric_key = get_metric_key(gal_players)
+
+        for player in gal_players:
+            username = player.get('username', 'Unknown')
+            entry = leaderboard.setdefault(username, {"count": 0, "score": 0})
+            entry["count"] += 1
+            if metric_key:
+                value = player.get(metric_key, 0)
+                if isinstance(value, (int, float)):
+                    entry["score"] += value
+
+    if games_with_gal == 0 or not leaderboard:
+        await ctx.send(f"❌ Aucune partie avec **{TAG_CLAN}** dans les {len(game_ids)} dernières parties")
+        return
+
+    leaderboard_sorted = sorted(
+        leaderboard.items(),
+        key=lambda x: (x[1]["score"], x[1]["count"]),
+        reverse=True
+    )[:top]
 
     embed = discord.Embed(
-        title=f"🏆 Top {top} Joueurs [{TAG_CLAN}] - Leaderboard",
+        title=f"🏆 Top {top} Joueurs [{TAG_CLAN}] - {games_with_gal}/{len(game_ids)} parties",
         color=discord.Color.purple()
     )
 
     description = "```\n"
-    description += f"{'#':<3} {'JOUEUR':<20} {'W/L':<8} {'Games':<8}\n"
+    description += f"{'#':<3} {'JOUEUR':<20} {'SCORE':<8} {'GAMES':<8}\n"
     description += "-" * 43 + "\n"
 
-    for i, player in enumerate(gal_players_sorted, 1):
-        username = player.get('username', 'Unknown')[:20]
-        wlr = player.get('weightedWLRatio')
-        games = player.get('games', player.get('playerSessions', 'n/a'))
-        wlr_display = f"{wlr:.2f}" if isinstance(wlr, (int, float)) else "n/a"
-        description += f"{i:<3} {username:<20} {wlr_display:<8} {games:<8}\n"
+    for i, (username, stats) in enumerate(leaderboard_sorted, 1):
+        display_name = username[:20]
+        description += f"{i:<3} {display_name:<20} {stats['score']:<8.2f} {stats['count']:<8}\n"
 
     description += "```"
     embed.description = description
 
     await ctx.send(embed=embed)
+
+@bot.command(name='leaderboard_gal')
+async def leaderboard_gal(ctx, max_games: int = MAX_GAMES_DEFAULT, top: int = 10):
+    """Alias de leaderboard_clans"""
+    await leaderboard_clans(ctx, max_games, top)
 
 @bot.command(name='game')
 async def game_info(ctx, game_id: str = None):
@@ -243,9 +369,9 @@ async def game_info(ctx, game_id: str = None):
     
     await ctx.send(f"🔄 Récupération de la partie {game_id}...")
     
-    data = await get_game_data(game_id)
+    data, error = await get_game_data(game_id)
     if not data:
-        await ctx.send(f"❌ Impossible de récupérer les données de la partie {game_id}")
+        await ctx.send(f"❌ Impossible de récupérer les données de la partie {game_id}. {format_api_error(error)}")
         return
     
     # Afficher le JSON formaté (limité à 2000 caractères)
@@ -264,8 +390,11 @@ async def find_gal_players(ctx, game_id: str = None):
         await ctx.send("❌ Usage : `!find_gal_players <game_id>`")
         return
     
-    data = await get_game_data(game_id)
-    if not data or 'info' not in data or 'players' not in data['info']:
+    data, error = await get_game_data(game_id)
+    if not data:
+        await ctx.send(f"❌ Données de partie invalides. {format_api_error(error)}")
+        return
+    if 'info' not in data or 'players' not in data['info']:
         await ctx.send("❌ Données de partie invalides")
         return
     
