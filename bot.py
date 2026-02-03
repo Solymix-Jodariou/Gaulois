@@ -435,18 +435,60 @@ async def setleaderboard(interaction: discord.Interaction):
         color=discord.Color.orange(),
     )
 
-    lines = []
-    lines.append(f"{'#':<3} {'JOUEUR':<14} {'RATIO':>5}  {'FFA':>7}  {'TEAM':>7}")
-    lines.append("-" * 44)
-    for i, p in enumerate(players[:30], 1):
-        username = p["username"][:14]
-        ratio = f"{p['ratio']:.2f}"
-        ffa = f"{p['wins_ffa']}W/{p['losses_ffa']}L"
-        team = f"{p['wins_team']}W/{p['losses_team']}L"
-        lines.append(f"{i:<3} {username:<14} {ratio:>5}  {ffa:>7}  {team:>7}")
+    top = players[:30]
+    total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
+    total_losses = sum(p["losses_ffa"] + p["losses_team"] for p in top)
+    total_players = len(top)
 
-    embed.description = "```\n" + "\n".join(lines) + "\n```"
-    embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
+    embed.description = (
+        f"**Joueurs:** {total_players}  |  "
+        f"**Wins:** {total_wins}  |  "
+        f"**Losses:** {total_losses}"
+    )
+    if interaction.guild and interaction.guild.icon:
+        embed.set_thumbnail(url=interaction.guild.icon.url)
+
+    medals = ["🥇", "🥈", "🥉"]
+    for idx, p in enumerate(top[:3]):
+        ratio = f"{p['ratio']:.2f}"
+        embed.add_field(
+            name=f"{medals[idx]} {p['username']}",
+            value=(
+                f"Ratio: **{ratio}**\n"
+                f"FFA: `{p['wins_ffa']}W / {p['losses_ffa']}L`\n"
+                f"TEAM: `{p['wins_team']}W / {p['losses_team']}L`"
+            ),
+            inline=False,
+        )
+
+    def format_line(rank, player):
+        username = player["username"][:14]
+        ratio = f"{player['ratio']:.2f}"
+        ffa = f"{player['wins_ffa']}W/{player['losses_ffa']}L"
+        team = f"{player['wins_team']}W/{player['losses_team']}L"
+        return f"{rank:<3} {username:<14} {ratio:>5}  {ffa:>7}  {team:>7}"
+
+    header = f"{'#':<3} {'JOUEUR':<14} {'RATIO':>5}  {'FFA':>7}  {'TEAM':>7}"
+    sep = "-" * 44
+
+    col1 = [header, sep]
+    col2 = [header, sep]
+    col3 = [header, sep]
+
+    for i, p in enumerate(top[3:], 4):
+        if i <= 12:
+            col1.append(format_line(i, p))
+        elif i <= 21:
+            col2.append(format_line(i, p))
+        else:
+            col3.append(format_line(i, p))
+
+    if len(col1) > 2:
+        embed.add_field(name="Top 4-12", value="```\n" + "\n".join(col1) + "\n```", inline=False)
+    if len(col2) > 2:
+        embed.add_field(name="Top 13-21", value="```\n" + "\n".join(col2) + "\n```", inline=False)
+    if len(col3) > 2:
+        embed.add_field(name="Top 22-30", value="```\n" + "\n".join(col3) + "\n```", inline=False)
 
     if last_updated:
         embed.set_footer(text=f"Mis à jour le {last_updated}")
