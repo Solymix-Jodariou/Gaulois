@@ -202,6 +202,28 @@ def load_leaderboard():
     return players, last_updated
 
 
+def get_progress_stats():
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS players,
+                COALESCE(SUM(wins_ffa + wins_team), 0) AS wins_total,
+                COALESCE(SUM(losses_ffa + losses_team), 0) AS losses_total
+            FROM player_stats
+            """
+        ).fetchone()
+        games_row = conn.execute(
+            "SELECT COUNT(*) FROM processed_games"
+        ).fetchone()
+    return {
+        "players": row[0] if row else 0,
+        "wins_total": row[1] if row else 0,
+        "losses_total": row[2] if row else 0,
+        "games_processed": games_row[0] if games_row else 0,
+    }
+
+
 def game_mode(info):
     return (info.get("config", {}) or {}).get("gameMode") or ""
 
@@ -409,6 +431,24 @@ async def debug_api(interaction: discord.Interaction):
         f"Range hours: {RANGE_HOURS}\n"
         f"Refresh minutes: {REFRESH_MINUTES}\n"
         f"Backfill interval minutes: {BACKFILL_INTERVAL_MINUTES}"
+    )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(name="stats_progress", description="Affiche la progression du backfill.")
+async def stats_progress(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    cursor, completed, last_attempt, last_error = get_backfill_state()
+    stats = get_progress_stats()
+    msg = (
+        f"Backfill cursor: {cursor}\n"
+        f"Backfill done: {completed}\n"
+        f"Last attempt: {last_attempt}\n"
+        f"Last error: {last_error}\n"
+        f"Games traitées: {stats['games_processed']}\n"
+        f"Joueurs connus: {stats['players']}\n"
+        f"Wins total: {stats['wins_total']}\n"
+        f"Losses total: {stats['losses_total']}"
     )
     await interaction.followup.send(msg, ephemeral=True)
 
