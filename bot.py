@@ -285,6 +285,15 @@ async def init_db():
         )
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS leaderboard_message_1v1_gal (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ffa_players (
                 discord_id BIGINT PRIMARY KEY,
                 pseudo TEXT NOT NULL,
@@ -958,6 +967,87 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
     return embed
 
 
+async def build_leaderboard_1v1_gal_embed(guild):
+    top, last_updated = await load_1v1_leaderboard()
+    if not top:
+        return None
+
+    gal_items = []
+    for idx, p in enumerate(top, 1):
+        name = p.get("name") or "Unknown"
+        if is_clan_username(name):
+            item = dict(p)
+            item["rank"] = idx
+            gal_items.append(item)
+
+    if not gal_items:
+        return None
+
+    embed = discord.Embed(
+        title=f"🥇 Leaderboard 1v1 {CLAN_DISPLAY} — Top 100",
+        color=discord.Color.orange(),
+    )
+    total_games = sum(p.get("games", 0) for p in gal_items)
+    embed.description = f"**Joueurs:** {len(gal_items)}  |  **Games:** {total_games}"
+    if guild and guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    name_width = 16
+
+    def truncate_name(name: str) -> str:
+        if len(name) <= name_width:
+            return name
+        return name[: name_width - 3] + "..."
+
+    truncated_counts = {}
+    for p in gal_items:
+        t = truncate_name(p.get("name") or "Unknown")
+        truncated_counts[t] = truncated_counts.get(t, 0) + 1
+
+    def format_table_name(player):
+        raw_name = player.get("name") or "Unknown"
+        name = truncate_name(raw_name)
+        if truncated_counts.get(name, 0) > 1 and len(raw_name) >= 3:
+            suffix = raw_name[-3:]
+            base = raw_name[: name_width - 4] if len(raw_name) >= name_width - 3 else raw_name
+            name = base[: name_width - 4] + "+" + suffix
+        if len(name) >= name_width:
+            name = name[: name_width - 1]
+        return f"★{name}"
+
+    def format_line(player):
+        rank = player["rank"]
+        username = format_table_name(player)
+        elo = player.get("elo")
+        elo_text = f"{int(elo)}" if isinstance(elo, (int, float)) else "?"
+        games = f"{player.get('games', 0)}"
+        ratio_pct = player.get("ratio_pct")
+        ratio_text = f"{ratio_pct:.1f}%" if isinstance(ratio_pct, (int, float)) else "?"
+        return f"{rank:<3} {username:<{name_width}} {elo_text:>5}  {games:>5}  {ratio_text:>6}"
+
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'ELO':>5} {'GAMES':>5} {'RATIO':>6}"
+    sep = "-" * (name_width + 24)
+    table = [header, sep]
+    for p in gal_items:
+        table.append(format_line(p))
+
+    embed.add_field(name="Classement 1v1 [GAL]", value="```\n" + "\n".join(table) + "\n```", inline=False)
+
+    if last_updated:
+        try:
+            if isinstance(last_updated, datetime):
+                last_dt = last_updated
+            else:
+                last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            next_dt = last_dt + timedelta(minutes=ONEV1_REFRESH_MINUTES)
+            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+        except Exception:
+            footer = f"Mis à jour le {last_updated}"
+        embed.set_footer(text=footer)
+
+    return embed
+
+
 async def get_leaderboard_message_ffa(guild_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -1018,6 +1108,38 @@ async def clear_leaderboard_message_1v1(guild_id: int):
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM leaderboard_message_1v1 WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def get_leaderboard_message_1v1_gal(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM leaderboard_message_1v1_gal WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_leaderboard_message_1v1_gal(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO leaderboard_message_1v1_gal (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_leaderboard_message_1v1_gal(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM leaderboard_message_1v1_gal WHERE guild_id = $1",
             guild_id,
         )
 
@@ -1161,6 +1283,25 @@ async def update_leaderboard_message_1v1():
                 await message.edit(embed=embed, view=Leaderboard1v1View(1, 20))
         except Exception:
             await clear_leaderboard_message_1v1(guild.id)
+
+
+async def update_leaderboard_message_1v1_gal():
+    if not bot.guilds:
+        return
+    for guild in bot.guilds:
+        record = await get_leaderboard_message_1v1_gal(guild.id)
+        if not record:
+            continue
+        channel_id = record["channel_id"]
+        message_id = record["message_id"]
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            embed = await build_leaderboard_1v1_gal_embed(guild)
+            if embed:
+                await message.edit(embed=embed)
+        except Exception:
+            await clear_leaderboard_message_1v1_gal(guild.id)
 
 
 async def get_progress_stats():
@@ -1543,6 +1684,7 @@ async def live_1v1_loop():
             start_dt = end_dt - timedelta(hours=48)
             await refresh_1v1_from_range(start_dt, end_dt)
             await update_leaderboard_message_1v1()
+            await update_leaderboard_message_1v1_gal()
         except Exception as exc:
             print(f"Live 1v1 refresh failed: {exc}")
         await asyncio.sleep(ONEV1_REFRESH_MINUTES * 60)
@@ -1708,6 +1850,52 @@ async def removeleaderboard1v1(interaction: discord.Interaction):
         pass
     await clear_leaderboard_message_1v1(interaction.guild.id)
     await interaction.response.send_message("Leaderboard 1v1 supprimé.", ephemeral=True)
+
+
+@bot.tree.command(name="setleaderboard1v1gal", description="Show the 1v1 leaderboard for [GAL] members.")
+async def setleaderboard1v1gal(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+
+    record = await get_leaderboard_message_1v1_gal(interaction.guild.id)
+    if record:
+        await interaction.response.send_message(
+            "Un leaderboard 1v1 [GAL] est déjà actif. Utilise /removeleaderboard1v1gal.",
+            ephemeral=True,
+        )
+        return
+
+    embed = await build_leaderboard_1v1_gal_embed(interaction.guild)
+    if not embed:
+        await interaction.response.send_message(
+            "Aucune donnée 1v1 [GAL] disponible pour le moment.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(embed=embed)
+    message = await interaction.original_response()
+    await set_leaderboard_message_1v1_gal(interaction.guild.id, interaction.channel_id, message.id)
+
+
+@bot.tree.command(name="removeleaderboard1v1gal", description="Supprime le leaderboard 1v1 [GAL] du serveur.")
+async def removeleaderboard1v1gal(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    record = await get_leaderboard_message_1v1_gal(interaction.guild.id)
+    if not record:
+        await interaction.response.send_message("Aucun leaderboard 1v1 [GAL] actif.", ephemeral=True)
+        return
+    try:
+        channel = bot.get_channel(record["channel_id"]) or await bot.fetch_channel(record["channel_id"])
+        message = await channel.fetch_message(record["message_id"])
+        await message.delete()
+    except Exception:
+        pass
+    await clear_leaderboard_message_1v1_gal(interaction.guild.id)
+    await interaction.response.send_message("Leaderboard 1v1 [GAL] supprimé.", ephemeral=True)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
