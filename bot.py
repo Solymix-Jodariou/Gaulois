@@ -1,237 +1,74 @@
 import discord
 from discord.ext import commands
 import aiohttp
-import os
+import json
 from datetime import datetime
-import asyncio
 
 # Configuration
-TOKEN = os.environ.get('DISCORD_TOKEN')
-TAG = "GAL"  # Change si besoin
+TOKEN = 'MTM1MzQ3NDk3MjA1OTgzMjMzMA.GR6JDz.tQqCL1f7LI80WI3U4hVsJyusfN7d1MmA_DPKXQ'
+TAG_CLAN = 'GAL'
+API_BASE = 'https://api.openfront.io'
 
-# Intents Discord
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
-
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Dictionnaire pour stocker les pseudos Openfront des membres
-player_names = {}
+# Base de données simple (pseudo discord -> pseudo openfront)
+registered_users = {}
+
+# ==================== FONCTIONS API ====================
+
+async def get_leaderboard():
+    """Récupère le leaderboard complet"""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(f'{API_BASE}/leaderboard') as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
+        except Exception as e:
+            print(f"❌ Erreur API leaderboard: {e}")
+            return None
+
+async def get_game_data(game_id):
+    """Récupère les données d'une partie"""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(f'{API_BASE}/game/{game_id}') as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
+        except Exception as e:
+            print(f"❌ Erreur API game: {e}")
+            return None
+
+def get_clan_stats(leaderboard_data, clan_tag):
+    """Extrait les stats d'un clan du leaderboard"""
+    if not leaderboard_data or 'clans' not in leaderboard_data:
+        return None
+    
+    for clan in leaderboard_data['clans']:
+        if clan['clanTag'].upper() == clan_tag.upper():
+            return clan
+    return None
+
+# ==================== COMMANDES ====================
 
 @bot.event
 async def on_ready():
-    print(f'✅ {bot.user} est connecté !')
-    print(f'📊 Serveurs : {len(bot.guilds)}')
-    for guild in bot.guilds:
-        print(f'  - {guild.name} ({guild.id})')
-    
-    # Charge le module OpenFront API
-    try:
-        await bot.load_extension('openfront_api')
-        print('✅ Module OpenFront API chargé !')
-    except Exception as e:
-        print(f'⚠️ Module OpenFront non chargé : {e}')
-
-@bot.command(name='register')
-async def register(ctx, *, openfront_pseudo: str):
-    """Enregistre ton pseudo Openfront.io"""
-    player_names[ctx.author.id] = openfront_pseudo
-    await ctx.send(f"✅ Pseudo Openfront enregistré : **{openfront_pseudo}**")
-    print(f"Enregistrement : {ctx.author.name} -> {openfront_pseudo}")
-
-@bot.command(name='unregister')
-async def unregister(ctx):
-    """Retire ton pseudo enregistré"""
-    if ctx.author.id in player_names:
-        del player_names[ctx.author.id]
-        await ctx.send("✅ Pseudo supprimé !")
-    else:
-        await ctx.send("❌ Tu n'as pas de pseudo enregistré.")
-
-@bot.command(name='myinfo')
-async def myinfo(ctx):
-    """Affiche ton pseudo enregistré"""
-    if ctx.author.id in player_names:
-        pseudo = player_names[ctx.author.id]
-        await ctx.send(f"📝 Ton pseudo enregistré : **{pseudo}**")
-    else:
-        await ctx.send("❌ Tu n'as pas encore enregistré ton pseudo. Utilise `!register <pseudo>`")
-
-async def get_player_stats(session, player_name):
-    """Récupère les stats d'un joueur depuis l'API Openfront"""
-    try:
-        # API Openfront - Stats du joueur
-        url = f"https://api.openfront.io/player/{player_name}"
-        
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                data = await response.json()
-                
-                # Extraction des stats
-                wins = data.get('wins', 0)
-                losses = data.get('losses', 0)
-                games = wins + losses
-                winrate = (wins / games * 100) if games > 0 else 0
-                
-                return {
-                    'name': player_name,
-                    'wins': wins,
-                    'losses': losses,
-                    'games': games,
-                    'winrate': winrate,
-                    'rank': data.get('rank', 'N/A'),
-                    'elo': data.get('elo', 0)
-                }
-            elif response.status == 404:
-                print(f"❌ Joueur non trouvé : {player_name}")
-                return None
-            else:
-                print(f"⚠️ Erreur API ({response.status}) pour {player_name}")
-                return None
-                
-    except asyncio.TimeoutError:
-        print(f"⏱️ Timeout pour {player_name}")
-        return None
-    except Exception as e:
-        print(f"❌ Erreur pour {player_name}: {e}")
-        return None
-
-@bot.command(name='stats')
-async def stats(ctx):
-    """Affiche les stats de tous les membres GAL enregistrés"""
-    
-    msg = await ctx.send("🔄 Récupération des statistiques...")
-    
-    # Récupérer tous les membres avec le tag GAL
-    members_with_tag = []
-    for member in ctx.guild.members:
-        # Vérifier le pseudo Discord ou le nickname
-        display_name = member.nick if member.nick else member.name
-        if TAG in display_name.upper():
-            if member.id in player_names:
-                members_with_tag.append({
-                    'discord_member': member,
-                    'openfront_name': player_names[member.id]
-                })
-    
-    if not members_with_tag:
-        await msg.edit(content=f"❌ Aucun membre avec le tag **{TAG}** n'a enregistré son pseudo.\n"
-                               f"Utilisez `!register <pseudo_openfront>` pour vous enregistrer.")
-        return
-    
-    # Récupérer les stats de chaque membre
-    stats_list = []
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = []
-        for member_data in members_with_tag:
-            task = get_player_stats(session, member_data['openfront_name'])
-            tasks.append(task)
-        
-        results = await asyncio.gather(*tasks)
-        
-        for i, result in enumerate(results):
-            if result:
-                result['discord_name'] = members_with_tag[i]['discord_member'].display_name
-                stats_list.append(result)
-    
-    if not stats_list:
-        await msg.edit(content="❌ Impossible de récupérer les statistiques. Vérifiez que les pseudos sont corrects.")
-        return
-    
-    # Trier par taux de victoire
-    stats_list.sort(key=lambda x: x['winrate'], reverse=True)
-    
-    # Créer l'embed
-    embed = discord.Embed(
-        title=f"📊 Statistiques Openfront - {TAG}",
-        description=f"Classement par taux de victoire ({len(stats_list)} joueurs)",
-        color=discord.Color.blue(),
-        timestamp=datetime.now()
-    )
-    
-    for i, player_stat in enumerate(stats_list, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
-        
-        embed.add_field(
-            name=f"{medal} {player_stat['discord_name']}",
-            value=f"```"
-                  f"Pseudo    : {player_stat['name']}\n"
-                  f"Victoires : {player_stat['wins']}\n"
-                  f"Défaites  : {player_stat['losses']}\n"
-                  f"Total     : {player_stat['games']}\n"
-                  f"Winrate   : {player_stat['winrate']:.1f}%\n"
-                  f"ELO       : {player_stat['elo']}\n"
-                  f"Rank      : {player_stat['rank']}"
-                  f"```",
-            inline=False
-        )
-    
-    embed.set_footer(text="Données fournies par l'API Openfront.io")
-    
-    await msg.edit(content=None, embed=embed)
-
-@bot.command(name='leaderboard')
-async def leaderboard(ctx, limit: int = 10):
-    """Affiche le classement complet (par défaut top 10)"""
-    
-    if limit > 25:
-        await ctx.send("⚠️ Limite maximale : 25 joueurs")
-        limit = 25
-    
-    msg = await ctx.send(f"🔄 Récupération du top {limit}...")
-    
-    members_with_tag = []
-    for member in ctx.guild.members:
-        display_name = member.nick if member.nick else member.name
-        if TAG in display_name.upper() and member.id in player_names:
-            members_with_tag.append({
-                'discord_member': member,
-                'openfront_name': player_names[member.id]
-            })
-    
-    if not members_with_tag:
-        await msg.edit(content=f"❌ Aucun membre trouvé.")
-        return
-    
-    stats_list = []
-    async with aiohttp.ClientSession() as session:
-        tasks = [get_player_stats(session, m['openfront_name']) for m in members_with_tag]
-        results = await asyncio.gather(*tasks)
-        
-        for i, result in enumerate(results):
-            if result:
-                result['discord_name'] = members_with_tag[i]['discord_member'].display_name
-                stats_list.append(result)
-    
-    stats_list.sort(key=lambda x: x['winrate'], reverse=True)
-    stats_list = stats_list[:limit]
-    
-    embed = discord.Embed(
-        title=f"🏆 TOP {limit} - {TAG}",
-        color=discord.Color.gold(),
-        timestamp=datetime.now()
-    )
-    
-    leaderboard_text = ""
-    for i, p in enumerate(stats_list, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        leaderboard_text += f"{medal} **{p['discord_name']}** - {p['winrate']:.1f}% ({p['wins']}V/{p['losses']}D)\n"
-    
-    embed.description = leaderboard_text
-    embed.set_footer(text="Données fournies par l'API Openfront.io")
-    
-    await msg.edit(content=None, embed=embed)
+    print(f'✅ Bot connecté : {bot.user.name}')
+    print(f'🎯 Tag suivi : {TAG_CLAN}')
+    print(f'📡 API : {API_BASE}')
 
 @bot.command(name='help_bot')
 async def help_command(ctx):
     """Affiche l'aide"""
     embed = discord.Embed(
         title="🤖 Commandes du Bot Openfront",
-        description="Bot de statistiques pour Openfront.io",
-        color=discord.Color.green()
+        description=f"Bot de statistiques pour Openfront.io",
+        color=discord.Color.blue()
     )
+    
     embed.add_field(
         name="!register <pseudo>",
         value="Enregistre ton pseudo Openfront.io",
@@ -248,20 +85,185 @@ async def help_command(ctx):
         inline=False
     )
     embed.add_field(
-        name="!stats",
-        value=f"Affiche les stats de tous les membres {TAG}",
+        name="!stats_gal",
+        value="Affiche les stats globales du clan GAL",
         inline=False
     )
     embed.add_field(
-        name="!leaderboard [nombre]",
-        value="Affiche le classement (par défaut top 10)",
+        name="!leaderboard_clans [top]",
+        value="Affiche le classement des clans (défaut: top 10)",
         inline=False
     )
-    embed.set_footer(text=f"Tag recherché : {TAG}")
+    embed.add_field(
+        name="!game <game_id>",
+        value="Affiche les infos d'une partie",
+        inline=False
+    )
+    
+    embed.set_footer(text=f"Tag recherché : {TAG_CLAN}")
     await ctx.send(embed=embed)
 
-# Lancer le bot
-if TOKEN:
-    bot.run(TOKEN)
-else:
-    print("❌ ERREUR : Token Discord manquant !")
+@bot.command(name='register')
+async def register(ctx, pseudo: str = None):
+    """Enregistre le pseudo Openfront d'un joueur"""
+    if not pseudo:
+        await ctx.send("❌ Usage : `!register <pseudo_openfront>`")
+        return
+    
+    registered_users[str(ctx.author.id)] = pseudo
+    await ctx.send(f"✅ {ctx.author.mention} enregistré avec le pseudo **{pseudo}**")
+
+@bot.command(name='unregister')
+async def unregister(ctx):
+    """Supprime l'enregistrement"""
+    user_id = str(ctx.author.id)
+    if user_id in registered_users:
+        del registered_users[user_id]
+        await ctx.send("✅ Enregistrement supprimé")
+    else:
+        await ctx.send("❌ Tu n'es pas enregistré")
+
+@bot.command(name='myinfo')
+async def myinfo(ctx):
+    """Affiche les infos de l'utilisateur"""
+    user_id = str(ctx.author.id)
+    if user_id in registered_users:
+        pseudo = registered_users[user_id]
+        await ctx.send(f"📋 Ton pseudo Openfront : **{pseudo}**")
+    else:
+        await ctx.send("❌ Tu n'es pas enregistré. Utilise `!register <pseudo>`")
+
+@bot.command(name='stats_gal')
+async def stats_gal(ctx):
+    """Affiche les stats du clan GAL"""
+    await ctx.send("🔄 Récupération des stats...")
+    
+    data = await get_leaderboard()
+    if not data:
+        await ctx.send("❌ Impossible de récupérer les données du leaderboard")
+        return
+    
+    clan_stats = get_clan_stats(data, TAG_CLAN)
+    if not clan_stats:
+        await ctx.send(f"❌ Clan **{TAG_CLAN}** non trouvé dans le leaderboard")
+        return
+    
+    embed = discord.Embed(
+        title=f"📊 Stats du clan [{TAG_CLAN}]",
+        color=discord.Color.gold()
+    )
+    
+    embed.add_field(name="🎮 Parties jouées", value=f"`{clan_stats['games']:,}`", inline=True)
+    embed.add_field(name="✅ Victoires", value=f"`{clan_stats['wins']:,}`", inline=True)
+    embed.add_field(name="❌ Défaites", value=f"`{clan_stats['losses']:,}`", inline=True)
+    
+    embed.add_field(name="👥 Sessions joueurs", value=f"`{clan_stats['playerSessions']:,}`", inline=True)
+    embed.add_field(name="⚖️ W/L Ratio", value=f"`{clan_stats['weightedWLRatio']:.2f}`", inline=True)
+    embed.add_field(name="🏆 Wins pondérés", value=f"`{clan_stats['weightedWins']:.2f}`", inline=True)
+    
+    # Calcul du winrate
+    winrate = (clan_stats['wins'] / clan_stats['games'] * 100) if clan_stats['games'] > 0 else 0
+    embed.add_field(name="📈 Winrate", value=f"`{winrate:.1f}%`", inline=True)
+    
+    period = f"Du {data['start'][:10]} au {data['end'][:10]}"
+    embed.set_footer(text=period)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='leaderboard_clans')
+async def leaderboard_clans(ctx, top: int = 10):
+    """Affiche le classement des clans"""
+    await ctx.send(f"🔄 Récupération du top {top}...")
+    
+    data = await get_leaderboard()
+    if not data or 'clans' not in data:
+        await ctx.send("❌ Impossible de récupérer le leaderboard")
+        return
+    
+    # Trier par W/L ratio
+    clans_sorted = sorted(
+        data['clans'], 
+        key=lambda x: x['weightedWLRatio'], 
+        reverse=True
+    )[:top]
+    
+    embed = discord.Embed(
+        title=f"🏆 Top {top} Clans - Classement W/L Ratio",
+        color=discord.Color.purple()
+    )
+    
+    description = "```\n"
+    description += f"{'#':<3} {'TAG':<8} {'W/L':<8} {'Games':<8}\n"
+    description += "-" * 35 + "\n"
+    
+    for i, clan in enumerate(clans_sorted, 1):
+        tag = clan['clanTag']
+        wlr = clan['weightedWLRatio']
+        games = clan['games']
+        
+        # Highlight du clan GAL
+        if tag == TAG_CLAN:
+            description += f"►{i:<2} {tag:<8} {wlr:<8.2f} {games:<8}\n"
+        else:
+            description += f"{i:<3} {tag:<8} {wlr:<8.2f} {games:<8}\n"
+    
+    description += "```"
+    embed.description = description
+    
+    # Trouver la position du clan GAL
+    gal_position = next((i+1 for i, c in enumerate(clans_sorted) if c['clanTag'] == TAG_CLAN), None)
+    if gal_position:
+        embed.set_footer(text=f"📍 {TAG_CLAN} est #{gal_position}")
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='game')
+async def game_info(ctx, game_id: str = None):
+    """Affiche les infos d'une partie"""
+    if not game_id:
+        await ctx.send("❌ Usage : `!game <game_id>`")
+        return
+    
+    await ctx.send(f"🔄 Récupération de la partie {game_id}...")
+    
+    data = await get_game_data(game_id)
+    if not data:
+        await ctx.send(f"❌ Impossible de récupérer les données de la partie {game_id}")
+        return
+    
+    # Afficher le JSON formaté (limité à 2000 caractères)
+    json_str = json.dumps(data, indent=2)
+    
+    if len(json_str) > 1900:
+        json_str = json_str[:1900] + "\n...\n(tronqué)"
+    
+    await ctx.send(f"```json\n{json_str}\n```")
+    await ctx.send(f"ID: {game_id}")
+
+@bot.command(name='find_gal_players')
+async def find_gal_players(ctx, game_id: str = None):
+    """Trouve les joueurs GAL dans une partie"""
+    if not game_id:
+        await ctx.send("❌ Usage : `!find_gal_players <game_id>`")
+        return
+    
+    data = await get_game_data(game_id)
+    if not data or 'info' not in data or 'players' not in data['info']:
+        await ctx.send("❌ Données de partie invalides")
+        return
+    
+    gal_players = []
+    for player in data['info']['players']:
+        username = player.get('username', 'Unknown')
+        if f'[{TAG_CLAN}]' in username or username.startswith(f'{TAG_CLAN} '):
+            gal_players.append(username)
+    
+    if gal_players:
+        players_list = "\n".join(f"• {p}" for p in gal_players)
+        await ctx.send(f"✅ Joueurs **{TAG_CLAN}** trouvés :\n{players_list}")
+    else:
+        await ctx.send(f"❌ Aucun joueur **{TAG_CLAN}** dans cette partie")
+
+# ==================== LANCEMENT ====================
+
+bot.run(TOKEN)
