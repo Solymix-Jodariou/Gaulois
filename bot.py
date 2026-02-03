@@ -572,11 +572,11 @@ async def setleaderboard(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(
-        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 30",
+        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 100",
         color=discord.Color.orange(),
     )
 
-    top = players[:30]
+    top = players[:100]
     total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
     total_losses = sum(p["losses_ffa"] + p["losses_team"] for p in top)
     total_players = len(top)
@@ -643,19 +643,19 @@ async def setleaderboard(interaction: discord.Interaction):
     col3 = [header, sep]
 
     for i, p in enumerate(top[3:], 4):
-        if i <= 12:
+        if i <= 36:
             col1.append(format_line(i, p))
-        elif i <= 21:
+        elif i <= 69:
             col2.append(format_line(i, p))
         else:
             col3.append(format_line(i, p))
 
     if len(col1) > 2:
-        embed.add_field(name="Top 4-12", value="```\n" + "\n".join(col1) + "\n```", inline=False)
+        embed.add_field(name="Top 4-36", value="```\n" + "\n".join(col1) + "\n```", inline=False)
     if len(col2) > 2:
-        embed.add_field(name="Top 13-21", value="```\n" + "\n".join(col2) + "\n```", inline=False)
+        embed.add_field(name="Top 37-69", value="```\n" + "\n".join(col2) + "\n```", inline=False)
     if len(col3) > 2:
-        embed.add_field(name="Top 22-30", value="```\n" + "\n".join(col3) + "\n```", inline=False)
+        embed.add_field(name="Top 70-100", value="```\n" + "\n".join(col3) + "\n```", inline=False)
 
     if last_updated:
         embed.set_footer(text=f"Mis à jour le {last_updated}")
