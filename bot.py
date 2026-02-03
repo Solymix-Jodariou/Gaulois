@@ -231,11 +231,13 @@ async def on_ready():
     try:
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
+            # Sync guild commands (fast)
             await bot.tree.sync(guild=guild)
             print(f"Commands synced for guild {GUILD_ID}")
-            # Sync global commands too to remove stale ones like /register
-            await bot.tree.sync()
-            print("Global commands synced")
+            # Remove old global commands like /register
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync(guild=None)
+            print("Global commands cleared and synced")
         else:
             await bot.tree.sync()
             print("Commands synced globally")
