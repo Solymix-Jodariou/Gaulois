@@ -3,6 +3,7 @@ import discord
 from discord.ext import commands
 from datetime import datetime
 from collections import defaultdict
+import json
 
 class OpenFrontAPI:
     """Client pour l'API OpenFront officielle UNIQUEMENT"""
@@ -20,7 +21,7 @@ class OpenFrontAPI:
         url = f"{self.BASE_URL}/{endpoint}"
         
         try:
-            async with self.session.get(url) as response:
+            async with self.session.get(url, timeout=10) as response:
                 if response.status == 200:
                     return await response.json()
                 else:
@@ -33,21 +34,15 @@ class OpenFrontAPI:
             return None
     
     async def get_game(self, game_id):
-        """Récupère les détails d'une partie
-        
-        Args:
-            game_id: ID de la partie
-        """
+        """Récupère les détails d'une partie"""
         return await self._get(f"game/{game_id}")
     
     async def get_recent_games(self):
-        """Récupère les parties récentes (À ADAPTER selon l'API réelle)"""
-        # À remplacer par le vrai endpoint quand on le connaîtra
+        """Récupère les parties récentes"""
         endpoints_to_try = [
             "games",
             "games/recent",
             "matches",
-            "leaderboard"
         ]
         
         for endpoint in endpoints_to_try:
@@ -59,10 +54,10 @@ class OpenFrontAPI:
         return None
     
     async def get_player_games(self, username):
-        """Récupère les parties d'un joueur (À ADAPTER)"""
+        """Récupère les parties d'un joueur"""
         return await self._get(f"player/{username}/games")
     
-    async def get_leaderboard(self):
+    async def get_leaderboard_data(self):
         """Récupère le classement"""
         return await self._get("leaderboard")
     
@@ -111,6 +106,7 @@ class OpenFrontCommands(commands.Cog):
             description="\n".join(results),
             color=discord.Color.blue()
         )
+        embed.set_footer(text="API: https://api.openfront.io")
         
         await ctx.send(embed=embed)
     
@@ -128,53 +124,75 @@ class OpenFrontCommands(commands.Cog):
                 await ctx.send(f"❌ Impossible de récupérer la partie `{game_id}`")
                 return
             
-            # Affiche les données (à adapter selon le format réel)
             embed = discord.Embed(
                 title=f"🎮 Partie {game_id}",
                 color=discord.Color.green()
             )
             
-            # Affiche tout le JSON pour voir le format
-            import json
             json_str = json.dumps(data, indent=2)
             
-            # Discord limite à 1024 caractères par field
-            if len(json_str) > 1000:
-                json_str = json_str[:1000] + "..."
+            # Discord limite à 1024 caractères par field et 2000 pour la description
+            if len(json_str) > 1900:
+                json_str = json_str[:1900] + "\n...\n(tronqué)"
             
-            embed.add_field(
-                name="Données brutes",
-                value=f"```json\n{json_str}\n```",
-                inline=False
-            )
+            embed.description = f"```json\n{json_str}\n```"
+            embed.set_footer(text=f"ID: {game_id}")
             
             await ctx.send(embed=embed)
     
-    @commands.command(name='leaderboard', aliases=['top', 'classement'])
+    @commands.command(name='top_api', aliases=['classement_api'])
     async def show_leaderboard(self, ctx):
-        """Affiche le classement
+        """Affiche le classement depuis l'API
         
-        Usage: !leaderboard
+        Usage: !top_api
         """
         async with ctx.typing():
-            data = await self.api.get_leaderboard()
+            data = await self.api.get_leaderboard_data()
             
             if not data:
                 await ctx.send("❌ Impossible de récupérer le classement")
                 return
             
-            # Affiche les données
-            import json
-            json_str = json.dumps(data, indent=2)[:1000]
+            json_str = json.dumps(data, indent=2)
+            
+            if len(json_str) > 1900:
+                json_str = json_str[:1900] + "\n...\n(tronqué)"
             
             embed = discord.Embed(
-                title="🏆 Classement OpenFront",
+                title="🏆 Classement OpenFront (API)",
                 description=f"```json\n{json_str}\n```",
                 color=discord.Color.gold()
+            )
+            
+            await ctx.send(embed=embed)
+    
+    @commands.command(name='player_api')
+    async def get_player_info(self, ctx, username: str):
+        """Récupère les parties d'un joueur
+        
+        Usage: !player_api USERNAME
+        """
+        async with ctx.typing():
+            data = await self.api.get_player_games(username)
+            
+            if not data:
+                await ctx.send(f"❌ Impossible de récupérer les parties de `{username}`")
+                return
+            
+            json_str = json.dumps(data, indent=2)
+            
+            if len(json_str) > 1900:
+                json_str = json_str[:1900] + "\n...\n(tronqué)"
+            
+            embed = discord.Embed(
+                title=f"👤 Parties de {username}",
+                description=f"```json\n{json_str}\n```",
+                color=discord.Color.blue()
             )
             
             await ctx.send(embed=embed)
 
 
 async def setup(bot):
+    """Charge le module dans le bot"""
     await bot.add_cog(OpenFrontCommands(bot))
