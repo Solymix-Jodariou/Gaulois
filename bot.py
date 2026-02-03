@@ -544,15 +544,37 @@ async def setleaderboard(interaction: discord.Interaction):
             inline=False,
         )
 
+    name_width = 16
+
+    def truncate_name(name: str) -> str:
+        if len(name) <= name_width:
+            return name
+        return name[: name_width - 3] + "..."
+
+    # Precompute counts of truncated names to disambiguate duplicates
+    truncated_counts = {}
+    for p in top[3:]:
+        t = truncate_name(p["display_name"])
+        truncated_counts[t] = truncated_counts.get(t, 0) + 1
+
+    def format_table_name(player):
+        display = player["display_name"]
+        name = truncate_name(display)
+        if truncated_counts.get(name, 0) > 1:
+            suffix = player["username"][-3:]
+            base = display[: name_width - 4] if len(display) >= name_width - 3 else display
+            name = base[: name_width - 4] + "+" + suffix
+        return name
+
     def format_line(rank, player):
-        username = player["display_name"][:14]
+        username = format_table_name(player)
         ratio = f"{player['ratio']:.2f}"
         team = f"{player['wins_team']}W/{player['losses_team']}L"
         games = f"{player['total_games']}"
-        return f"{rank:<3} {username:<14} {ratio:>5}  {team:>7}  {games:>3}"
+        return f"{rank:<3} {username:<{name_width}} {ratio:>5}  {team:>7}  {games:>3}"
 
-    header = f"{'#':<3} {'JOUEUR':<14} {'RATIO':>5}  {'TEAM':>7}  {'G':>3}"
-    sep = "-" * 40
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'RATIO':>5}  {'TEAM':>7}  {'G':>3}"
+    sep = "-" * (name_width + 24)
 
     col1 = [header, sep]
     col2 = [header, sep]
@@ -671,3 +693,4 @@ if __name__ == "__main__":
     if not DB_URL:
         raise ValueError("DATABASE_URL missing (Postgres).")
     bot.run(TOKEN)
+
