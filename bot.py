@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 DB_PATH = "leaderboard.db"
 CLAN_TAG = "[GAL]"
 
@@ -207,6 +207,9 @@ async def setleaderboard(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     if not TOKEN:
+        print("❌ DISCORD_TOKEN manquant.")
+        print("🔍 Variables détectées: DISCORD_TOKEN=%s, DISCORD_BOT_TOKEN=%s"
+              % (bool(os.getenv("DISCORD_TOKEN")), bool(os.getenv("DISCORD_BOT_TOKEN"))))
         raise ValueError("DISCORD_TOKEN manquant.")
     bot.run(TOKEN)
 import discord
