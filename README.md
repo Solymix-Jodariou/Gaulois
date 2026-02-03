@@ -1,0 +1,2 @@
+# Gaulois
+Bot exclusif [GAL]
