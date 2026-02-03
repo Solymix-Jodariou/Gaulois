@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import sqlite3
 import asyncio
@@ -12,8 +12,8 @@ TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 
 DB_PATH = "leaderboard.db"
-CLAN_TAG = "GAL"
-CLAN_DISPLAY = "[GAL]"
+CLAN_TAG = os.getenv("CLAN_TAG", "GAL")
+CLAN_DISPLAY = f"[{CLAN_TAG}]"
 
 API_BASE = "https://api.openfront.io/public"
 USER_AGENT = "Mozilla/5.0 (GauloisBot)"
@@ -197,7 +197,8 @@ async def on_ready():
 async def setleaderboard(interaction: discord.Interaction):
     if not leaderboard_cache:
         await interaction.response.send_message(
-            "No leaderboard data yet. Please wait for refresh.",
+            f"Aucun joueur avec le tag {CLAN_DISPLAY} trouve. "
+            f"Essaie d'augmenter la periode (LEADERBOARD_RANGE_HOURS) ou attends le prochain refresh.",
             ephemeral=True,
         )
         return
