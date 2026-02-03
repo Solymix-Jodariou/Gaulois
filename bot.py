@@ -224,6 +224,23 @@ def get_progress_stats():
     }
 
 
+def compute_next_backfill_eta(last_attempt):
+    if not last_attempt:
+        return "inconnu"
+    try:
+        last_dt = datetime.strptime(last_attempt, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except Exception:
+        return "inconnu"
+    next_dt = last_dt + timedelta(minutes=BACKFILL_INTERVAL_MINUTES)
+    now = datetime.now(timezone.utc)
+    delta = next_dt - now
+    if delta.total_seconds() <= 0:
+        return "imminent"
+    minutes = int(delta.total_seconds() // 60)
+    seconds = int(delta.total_seconds() % 60)
+    return f"{minutes}m {seconds}s"
+
+
 def game_mode(info):
     return (info.get("config", {}) or {}).get("gameMode") or ""
 
@@ -440,11 +457,13 @@ async def stats_progress(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     cursor, completed, last_attempt, last_error = get_backfill_state()
     stats = get_progress_stats()
+    eta = compute_next_backfill_eta(last_attempt)
     msg = (
         f"Backfill cursor: {cursor}\n"
         f"Backfill done: {completed}\n"
         f"Last attempt: {last_attempt}\n"
         f"Last error: {last_error}\n"
+        f"Prochaine tranche dans: {eta}\n"
         f"Games traitées: {stats['games_processed']}\n"
         f"Joueurs connus: {stats['players']}\n"
         f"Wins total: {stats['wins_total']}\n"
