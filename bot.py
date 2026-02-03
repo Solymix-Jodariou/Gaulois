@@ -36,6 +36,10 @@ BACKFILL_START = os.getenv("LEADERBOARD_BACKFILL_START", "2026-01-01T00:00:00Z")
 BACKFILL_INTERVAL_MINUTES = int(os.getenv("LEADERBOARD_BACKFILL_INTERVAL_MINUTES", "5"))
 MIN_GAMES = int(os.getenv("LEADERBOARD_MIN_GAMES", "10"))
 PRIOR_GAMES = int(os.getenv("LEADERBOARD_PRIOR_GAMES", "50"))
+ONEV1_BACKFILL_START = os.getenv("LEADERBOARD_1V1_BACKFILL_START", "2026-01-01T00:00:00Z")
+ONEV1_BACKFILL_INTERVAL_MINUTES = int(os.getenv("LEADERBOARD_1V1_BACKFILL_INTERVAL_MINUTES", "10"))
+ONEV1_MAX_GAMES = int(os.getenv("LEADERBOARD_1V1_MAX_GAMES", "200"))
+ONEV1_REFRESH_MINUTES = int(os.getenv("LEADERBOARD_1V1_REFRESH_MINUTES", "60"))
 SCORE_RATIO_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_RATIO_WEIGHT", "100"))
 SCORE_GAMES_WEIGHT = float(os.getenv("LEADERBOARD_SCORE_GAMES_WEIGHT", "0.1"))
 
@@ -55,6 +59,14 @@ if MIN_GAMES < 1:
     MIN_GAMES = 1
 if PRIOR_GAMES < 1:
     PRIOR_GAMES = 1
+if ONEV1_BACKFILL_INTERVAL_MINUTES < 5:
+    ONEV1_BACKFILL_INTERVAL_MINUTES = 5
+if ONEV1_MAX_GAMES < 10:
+    ONEV1_MAX_GAMES = 10
+if ONEV1_MAX_GAMES > 1000:
+    ONEV1_MAX_GAMES = 1000
+if ONEV1_REFRESH_MINUTES < 10:
+    ONEV1_REFRESH_MINUTES = 10
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -110,6 +122,34 @@ def is_clan_username(username: str) -> bool:
 
 def game_mode(info):
     return (info.get("config", {}) or {}).get("gameMode") or ""
+
+
+def get_winner_client_ids(info):
+    winner = info.get("winner")
+    if not winner or not isinstance(winner, list) or len(winner) < 3:
+        return set()
+    winners = winner[2]
+    if not isinstance(winners, list):
+        return set()
+    return set(winners)
+
+
+def is_1v1_game(info):
+    config = info.get("config", {}) or {}
+    mode = str(config.get("gameMode") or "").lower()
+    player_teams = config.get("playerTeams")
+    players = info.get("players") or []
+    if len(players) != 2:
+        return False
+    if "1v1" in mode or "solo" in mode:
+        return True
+    if "team" in mode:
+        return True
+    if isinstance(player_teams, int) and player_teams == 1:
+        return True
+    if isinstance(player_teams, str) and player_teams.lower() in {"solo", "solos", "1v1"}:
+        return True
+    return False
 
 
 async def fetch_player_sessions(player_id: str):
@@ -222,6 +262,15 @@ async def init_db():
         )
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS leaderboard_message_1v1 (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ffa_players (
                 discord_id BIGINT PRIMARY KEY,
                 pseudo TEXT NOT NULL,
@@ -239,6 +288,42 @@ async def init_db():
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_stats_1v1 (
+                username TEXT PRIMARY KEY,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_games_1v1 (
+                game_id TEXT PRIMARY KEY
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backfill_state_1v1 (
+                id INTEGER PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                completed BOOLEAN NOT NULL DEFAULT FALSE,
+                last_attempt TEXT,
+                last_error TEXT
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO backfill_state_1v1 (id, cursor, completed)
+            VALUES (1, $1, FALSE)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            ONEV1_BACKFILL_START,
         )
         # Migrations (Postgres)
         columns = await conn.fetch(
@@ -309,6 +394,41 @@ async def is_game_processed(game_id: str) -> bool:
             game_id,
         )
     return row is not None
+
+
+async def get_backfill_state_1v1():
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT cursor, completed, last_attempt, last_error
+            FROM backfill_state_1v1 WHERE id = 1
+            """
+        )
+    return row[0], bool(row[1]), row[2], row[3]
+
+
+async def set_backfill_state_1v1(
+    cursor,
+    completed,
+    last_attempt=None,
+    last_error=None,
+):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO backfill_state_1v1 (id, cursor, completed, last_attempt, last_error)
+            VALUES (1, $1, $2, $3, $4)
+            ON CONFLICT (id) DO UPDATE SET
+                cursor = EXCLUDED.cursor,
+                completed = EXCLUDED.completed,
+                last_attempt = EXCLUDED.last_attempt,
+                last_error = EXCLUDED.last_error
+            """,
+            cursor,
+            completed,
+            last_attempt,
+            last_error,
+        )
 
 
 async def mark_game_processed(game_id: str):
@@ -612,6 +732,71 @@ async def get_ffa_players():
         )
 
 
+async def is_game_processed_1v1(game_id: str) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM processed_games_1v1 WHERE game_id = $1",
+            game_id,
+        )
+    return row is not None
+
+
+async def mark_game_processed_1v1(game_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO processed_games_1v1 (game_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            game_id,
+        )
+
+
+async def upsert_1v1_stats(username: str, wins: int, losses: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO player_stats_1v1 (username, wins, losses, updated_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT(username) DO UPDATE SET
+                wins = player_stats_1v1.wins + EXCLUDED.wins,
+                losses = player_stats_1v1.losses + EXCLUDED.losses,
+                updated_at = EXCLUDED.updated_at
+            """,
+            username,
+            wins,
+            losses,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+
+async def load_1v1_leaderboard():
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT username, wins, losses, updated_at FROM player_stats_1v1"
+        )
+    players = []
+    last_updated = None
+    for row in rows:
+        wins = row[1]
+        losses = row[2]
+        games = wins + losses
+        ratio = (wins / games) if games > 0 else 0.0
+        score = calculate_score(wins, losses, games)
+        players.append(
+            {
+                "display_name": row[0],
+                "wins": wins,
+                "losses": losses,
+                "games": games,
+                "ratio": ratio,
+                "score": score,
+            }
+        )
+        if row[3] and (last_updated is None or row[3] > last_updated):
+            last_updated = row[3]
+    players = [p for p in players if p["games"] >= MIN_GAMES]
+    players.sort(key=lambda p: (p["score"], p["games"]), reverse=True)
+    return players[:100], last_updated
+
+
 async def load_ffa_leaderboard():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -706,6 +891,59 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
     return embed
 
 
+async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
+    top, last_updated = await load_1v1_leaderboard()
+    if not top:
+        return None
+
+    total_pages = get_total_pages(len(top), page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = top[start:end]
+
+    embed = discord.Embed(
+        title=f"🥇 Leaderboard 1v1 OpenFront — Page {page}/{total_pages}",
+        color=discord.Color.orange(),
+    )
+
+    total_wins = sum(p["wins"] for p in top)
+    total_losses = sum(p["losses"] for p in top)
+    embed.description = f"**Wins:** {total_wins}  |  **Losses:** {total_losses}"
+    if guild and guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    name_width = 16
+
+    def truncate_name(name: str) -> str:
+        if len(name) <= name_width:
+            return name
+        return name[: name_width - 3] + "..."
+
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'W/L':>7} {'G':>3}"
+    sep = "-" * (name_width + 22)
+    table = [header, sep]
+    for i, p in enumerate(page_items, start + 1):
+        name = truncate_name(p["display_name"])
+        score = f"{p['score']:.1f}"
+        wl = f"{p['wins']}W/{p['losses']}L"
+        games = f"{p['games']}"
+        table.append(f"{i:<3} {name:<{name_width}} {score:>5} {wl:>7} {games:>3}")
+
+    embed.add_field(name="Classement 1v1", value="```\n" + "\n".join(table) + "\n```", inline=False)
+
+    if last_updated:
+        try:
+            last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            next_dt = last_dt + timedelta(minutes=ONEV1_REFRESH_MINUTES)
+            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+        except Exception:
+            footer = f"Mis à jour le {last_updated}"
+        embed.set_footer(text=footer)
+
+    return embed
+
+
 async def get_leaderboard_message_ffa(guild_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -734,6 +972,38 @@ async def clear_leaderboard_message_ffa(guild_id: int):
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM leaderboard_message_ffa WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def get_leaderboard_message_1v1(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM leaderboard_message_1v1 WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_leaderboard_message_1v1(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO leaderboard_message_1v1 (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_leaderboard_message_1v1(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM leaderboard_message_1v1 WHERE guild_id = $1",
             guild_id,
         )
 
@@ -794,6 +1064,34 @@ class LeaderboardFfaView(discord.ui.View):
         await self.update(interaction, min(total_pages, self.page + 1))
 
 
+class Leaderboard1v1View(discord.ui.View):
+    def __init__(self, page: int, page_size: int):
+        super().__init__(timeout=None)
+        self.page = page
+        self.page_size = page_size
+
+    async def update(self, interaction: discord.Interaction, page: int):
+        embed = await build_leaderboard_1v1_embed(interaction.guild, page, self.page_size)
+        if not embed:
+            await interaction.response.send_message(
+                "No data for 1v1.",
+                ephemeral=True,
+            )
+            return
+        self.page = page
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="1v1_prev")
+    async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.update(interaction, max(1, self.page - 1))
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="1v1_next")
+    async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        top, _ = await load_1v1_leaderboard()
+        total_pages = get_total_pages(len(top), self.page_size)
+        await self.update(interaction, min(total_pages, self.page + 1))
+
+
 async def update_leaderboard_message():
     if not bot.guilds:
         return
@@ -830,6 +1128,25 @@ async def update_leaderboard_message_ffa():
                 await message.edit(embed=embed, view=LeaderboardFfaView(1, 20))
         except Exception:
             await clear_leaderboard_message_ffa(guild.id)
+
+
+async def update_leaderboard_message_1v1():
+    if not bot.guilds:
+        return
+    for guild in bot.guilds:
+        record = await get_leaderboard_message_1v1(guild.id)
+        if not record:
+            continue
+        channel_id = record["channel_id"]
+        message_id = record["message_id"]
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            embed = await build_leaderboard_1v1_embed(guild, 1, 20)
+            if embed:
+                await message.edit(embed=embed, view=Leaderboard1v1View(1, 20))
+        except Exception:
+            await clear_leaderboard_message_1v1(guild.id)
 
 
 async def get_progress_stats():
@@ -916,6 +1233,33 @@ async def fetch_game_info(session, game_id):
         return data.get("info", {})
 
 
+async def fetch_games_list(session, start_iso: str, end_iso: str, max_games: int):
+    games = []
+    offset = 0
+    while len(games) < max_games:
+        limit = min(1000, max_games - len(games))
+        params = {
+            "start": start_iso,
+            "end": end_iso,
+            "type": "Public",
+            "limit": str(limit),
+            "offset": str(offset),
+        }
+        url = f"{API_BASE}/games"
+        async with session.get(url, params=params, timeout=25) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+            batch = await resp.json()
+        if not batch:
+            break
+        games.extend(batch)
+        offset += len(batch)
+        if len(batch) < limit:
+            break
+    return games
+
+
 async def refresh_from_range(start_dt, end_dt):
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -942,6 +1286,46 @@ async def refresh_from_range(start_dt, end_dt):
             processed_in_step += 1
 
         return len(sessions), processed_in_step
+
+
+async def refresh_1v1_from_range(start_dt, end_dt):
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    headers = {"User-Agent": USER_AGENT}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        games = await fetch_games_list(session, start_iso, end_iso, ONEV1_MAX_GAMES)
+        processed_in_step = 0
+        for g in games:
+            game_id = g.get("game")
+            if not game_id:
+                continue
+            if await is_game_processed_1v1(game_id):
+                continue
+            try:
+                info = await fetch_game_info(session, game_id)
+            except Exception:
+                continue
+            if not is_1v1_game(info):
+                await mark_game_processed_1v1(game_id)
+                continue
+            winners = get_winner_client_ids(info)
+            if not winners:
+                await mark_game_processed_1v1(game_id)
+                continue
+            for p in info.get("players", []):
+                username_raw = p.get("username") or ""
+                username_key = normalize_username(username_raw)
+                if not username_key:
+                    continue
+                if p.get("clientID") in winners:
+                    await upsert_1v1_stats(username_key, 1, 0)
+                else:
+                    await upsert_1v1_stats(username_key, 0, 1)
+            await mark_game_processed_1v1(game_id)
+            processed_in_step += 1
+
+        return len(games), processed_in_step
 
 
 async def run_backfill_step():
@@ -1005,6 +1389,62 @@ async def live_loop():
         await asyncio.sleep(REFRESH_MINUTES * 60)
 
 
+async def run_backfill_1v1_step():
+    cursor, completed, _last_attempt, _last_error = await get_backfill_state_1v1()
+    if completed:
+        return {"status": "done", "cursor": cursor}
+
+    try:
+        start_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    except Exception:
+        start_dt = datetime.now(timezone.utc) - timedelta(hours=48)
+
+    end_dt = start_dt + timedelta(hours=48)
+    now_dt = datetime.now(timezone.utc)
+    if end_dt > now_dt:
+        end_dt = now_dt
+
+    last_attempt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_error = None
+
+    try:
+        await refresh_1v1_from_range(start_dt, end_dt)
+    except Exception as exc:
+        last_error = str(exc)[:500]
+        await set_backfill_state_1v1(cursor, False, last_attempt, last_error)
+        print(f"Backfill 1v1 failed: {exc}")
+        return {"status": "error", "cursor": cursor, "error": last_error}
+
+    new_cursor = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    completed = end_dt >= now_dt
+    await set_backfill_state_1v1(
+        new_cursor,
+        completed,
+        last_attempt,
+        last_error,
+    )
+    print(f"Backfill 1v1 step: {cursor} -> {new_cursor} (done={completed})")
+    return {"status": "ok", "cursor": new_cursor, "completed": completed}
+
+
+async def backfill_1v1_loop():
+    while True:
+        await run_backfill_1v1_step()
+        await asyncio.sleep(ONEV1_BACKFILL_INTERVAL_MINUTES * 60)
+
+
+async def live_1v1_loop():
+    while True:
+        try:
+            end_dt = datetime.now(timezone.utc)
+            start_dt = end_dt - timedelta(hours=48)
+            await refresh_1v1_from_range(start_dt, end_dt)
+            await update_leaderboard_message_1v1()
+        except Exception as exc:
+            print(f"Live 1v1 refresh failed: {exc}")
+        await asyncio.sleep(ONEV1_REFRESH_MINUTES * 60)
+
+
 @bot.event
 async def on_ready():
     await init_db()
@@ -1022,8 +1462,11 @@ async def on_ready():
 
     bot.add_view(LeaderboardView(1, 20))
     bot.add_view(LeaderboardFfaView(1, 20))
+    bot.add_view(Leaderboard1v1View(1, 20))
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
+    bot.loop.create_task(backfill_1v1_loop())
+    bot.loop.create_task(live_1v1_loop())
     print(f"Bot connected: {bot.user}")
 
 
@@ -1116,6 +1559,52 @@ async def removeleaderboardffa(interaction: discord.Interaction):
         pass
     await clear_leaderboard_message_ffa(interaction.guild.id)
     await interaction.response.send_message("Leaderboard FFA supprimé.", ephemeral=True)
+
+
+@bot.tree.command(name="setleaderboard1v1", description="Show the 1v1 leaderboard.")
+async def setleaderboard1v1(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+
+    record = await get_leaderboard_message_1v1(interaction.guild.id)
+    if record:
+        await interaction.response.send_message(
+            "Un leaderboard 1v1 est déjà actif. Utilise /removeleaderboard1v1.",
+            ephemeral=True,
+        )
+        return
+
+    embed = await build_leaderboard_1v1_embed(interaction.guild, 1, 20)
+    if not embed:
+        await interaction.response.send_message(
+            "Aucune donnée 1v1 disponible pour le moment.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(embed=embed, view=Leaderboard1v1View(1, 20))
+    message = await interaction.original_response()
+    await set_leaderboard_message_1v1(interaction.guild.id, interaction.channel_id, message.id)
+
+
+@bot.tree.command(name="removeleaderboard1v1", description="Supprime le leaderboard 1v1 du serveur.")
+async def removeleaderboard1v1(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    record = await get_leaderboard_message_1v1(interaction.guild.id)
+    if not record:
+        await interaction.response.send_message("Aucun leaderboard 1v1 actif.", ephemeral=True)
+        return
+    try:
+        channel = bot.get_channel(record["channel_id"]) or await bot.fetch_channel(record["channel_id"])
+        message = await channel.fetch_message(record["message_id"])
+        await message.delete()
+    except Exception:
+        pass
+    await clear_leaderboard_message_1v1(interaction.guild.id)
+    await interaction.response.send_message("Leaderboard 1v1 supprimé.", ephemeral=True)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
