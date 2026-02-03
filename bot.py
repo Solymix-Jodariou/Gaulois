@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 import asyncpg
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
@@ -83,6 +84,22 @@ def format_local_time(dt: datetime) -> str:
     return local_dt.strftime("%Y-%m-%d %H:%M")
 
 
+def is_pseudo_valid(pseudo: str) -> bool:
+    return "#" not in pseudo
+
+
+def compute_ffa_stats_from_sessions(sessions):
+    wins = losses = 0
+    for s in sessions:
+        mode = (s.get("gameMode") or "").lower()
+        if "free for all" in mode or mode == "ffa":
+            if s.get("hasWon"):
+                wins += 1
+            else:
+                losses += 1
+    return wins, losses
+
+
 def is_clan_username(username: str) -> bool:
     if not username:
         return False
@@ -93,6 +110,17 @@ def is_clan_username(username: str) -> bool:
 
 def game_mode(info):
     return (info.get("config", {}) or {}).get("gameMode") or ""
+
+
+async def fetch_player_sessions(player_id: str):
+    url = f"{API_BASE}/player/{player_id}/sessions"
+    headers = {"User-Agent": USER_AGENT}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(url, timeout=25) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+            return await resp.json()
 
 
 def normalize_username(raw: str) -> str:
@@ -180,6 +208,35 @@ async def init_db():
                 guild_id BIGINT PRIMARY KEY,
                 channel_id BIGINT NOT NULL,
                 message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS leaderboard_message_ffa (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ffa_players (
+                discord_id BIGINT PRIMARY KEY,
+                pseudo TEXT NOT NULL,
+                player_id TEXT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ffa_stats (
+                player_id TEXT PRIMARY KEY,
+                pseudo TEXT NOT NULL,
+                wins_ffa INTEGER DEFAULT 0,
+                losses_ffa INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -442,7 +499,7 @@ async def build_leaderboard_embed(guild, page: int, page_size: int):
     top, last_updated = await get_top_players()
     if not top:
         return None
-
+    
     total_pages = get_total_pages(len(top), page_size)
     page = max(1, min(page, total_pages))
     start = (page - 1) * page_size
@@ -512,6 +569,175 @@ async def build_leaderboard_embed(guild, page: int, page_size: int):
     return embed
 
 
+async def upsert_ffa_player(discord_id: int, pseudo: str, player_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ffa_players (discord_id, pseudo, player_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (discord_id) DO UPDATE SET
+                pseudo = EXCLUDED.pseudo,
+                player_id = EXCLUDED.player_id
+            """,
+            discord_id,
+            pseudo,
+            player_id,
+        )
+
+
+async def upsert_ffa_stats(player_id: str, pseudo: str, wins: int, losses: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ffa_stats (player_id, pseudo, wins_ffa, losses_ffa, updated_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (player_id) DO UPDATE SET
+                pseudo = EXCLUDED.pseudo,
+                wins_ffa = EXCLUDED.wins_ffa,
+                losses_ffa = EXCLUDED.losses_ffa,
+                updated_at = EXCLUDED.updated_at
+            """,
+            player_id,
+            pseudo,
+            wins,
+            losses,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+
+async def get_ffa_players():
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT discord_id, pseudo, player_id FROM ffa_players"
+        )
+
+
+async def load_ffa_leaderboard():
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT pseudo, wins_ffa, losses_ffa, updated_at FROM ffa_stats"
+        )
+    players = []
+    last_updated = None
+    for row in rows:
+        wins = row[1]
+        losses = row[2]
+        games = wins + losses
+        ratio = (wins / games) if games > 0 else 0.0
+        score = calculate_score(wins, losses, games)
+        players.append(
+            {
+                "display_name": row[0],
+                "wins": wins,
+                "losses": losses,
+                "games": games,
+                "ratio": ratio,
+                "score": score,
+            }
+        )
+        if row[3] and (last_updated is None or row[3] > last_updated):
+            last_updated = row[3]
+    players = [p for p in players if p["games"] >= MIN_GAMES]
+    players.sort(key=lambda p: (p["score"], p["games"]), reverse=True)
+    return players[:100], last_updated
+
+
+async def refresh_ffa_stats():
+    players = await get_ffa_players()
+    for _discord_id, pseudo, player_id in players:
+        try:
+            sessions = await fetch_player_sessions(player_id)
+            wins, losses = compute_ffa_stats_from_sessions(sessions)
+            await upsert_ffa_stats(player_id, pseudo, wins, losses)
+        except Exception:
+            continue
+
+
+async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
+    top, last_updated = await load_ffa_leaderboard()
+    if not top:
+        return None
+
+    total_pages = get_total_pages(len(top), page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = top[start:end]
+    
+    embed = discord.Embed(
+        title=f"🎯 Leaderboard FFA {CLAN_DISPLAY} — Page {page}/{total_pages}",
+        color=discord.Color.orange(),
+    )
+
+    total_wins = sum(p["wins"] for p in top)
+    total_losses = sum(p["losses"] for p in top)
+    embed.description = f"**Wins:** {total_wins}  |  **Losses:** {total_losses}"
+    if guild and guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    name_width = 16
+
+    def truncate_name(name: str) -> str:
+        if len(name) <= name_width:
+            return name
+        return name[: name_width - 3] + "..."
+
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'W/L':>7} {'G':>3}"
+    sep = "-" * (name_width + 22)
+    table = [header, sep]
+    for i, p in enumerate(page_items, start + 1):
+        name = truncate_name(p["display_name"])
+        score = f"{p['score']:.1f}"
+        wl = f"{p['wins']}W/{p['losses']}L"
+        games = f"{p['games']}"
+        table.append(f"{i:<3} {name:<{name_width}} {score:>5} {wl:>7} {games:>3}")
+
+    embed.add_field(name="Classement FFA", value="```\n" + "\n".join(table) + "\n```", inline=False)
+
+    if last_updated:
+        try:
+            last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            next_dt = last_dt + timedelta(minutes=REFRESH_MINUTES)
+            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+        except Exception:
+            footer = f"Mis à jour le {last_updated}"
+        embed.set_footer(text=footer)
+
+    return embed
+
+
+async def get_leaderboard_message_ffa(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM leaderboard_message_ffa WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_leaderboard_message_ffa(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO leaderboard_message_ffa (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_leaderboard_message_ffa(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM leaderboard_message_ffa WHERE guild_id = $1",
+            guild_id,
+        )
+
+
 class LeaderboardView(discord.ui.View):
     def __init__(self, page: int, page_size: int):
         super().__init__(timeout=None)
@@ -540,6 +766,34 @@ class LeaderboardView(discord.ui.View):
         await self.update(interaction, min(total_pages, self.page + 1))
 
 
+class LeaderboardFfaView(discord.ui.View):
+    def __init__(self, page: int, page_size: int):
+        super().__init__(timeout=None)
+        self.page = page
+        self.page_size = page_size
+
+    async def update(self, interaction: discord.Interaction, page: int):
+        embed = await build_leaderboard_ffa_embed(interaction.guild, page, self.page_size)
+        if not embed:
+            await interaction.response.send_message(
+                f"No data for FFA {CLAN_DISPLAY}.",
+                ephemeral=True,
+            )
+            return
+        self.page = page
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="ffa_prev")
+    async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.update(interaction, max(1, self.page - 1))
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="ffa_next")
+    async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        top, _ = await load_ffa_leaderboard()
+        total_pages = get_total_pages(len(top), self.page_size)
+        await self.update(interaction, min(total_pages, self.page + 1))
+
+
 async def update_leaderboard_message():
     if not bot.guilds:
         return
@@ -557,6 +811,25 @@ async def update_leaderboard_message():
                 await message.edit(embed=embed, view=LeaderboardView(1, 20))
         except Exception:
             await clear_leaderboard_message(guild.id)
+
+
+async def update_leaderboard_message_ffa():
+    if not bot.guilds:
+        return
+    for guild in bot.guilds:
+        record = await get_leaderboard_message_ffa(guild.id)
+        if not record:
+            continue
+        channel_id = record["channel_id"]
+        message_id = record["message_id"]
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            embed = await build_leaderboard_ffa_embed(guild, 1, 20)
+            if embed:
+                await message.edit(embed=embed, view=LeaderboardFfaView(1, 20))
+        except Exception:
+            await clear_leaderboard_message_ffa(guild.id)
 
 
 async def get_progress_stats():
@@ -725,6 +998,8 @@ async def live_loop():
             await refresh_from_range(start_dt, end_dt)
             print("Live refresh done")
             await update_leaderboard_message()
+            await refresh_ffa_stats()
+            await update_leaderboard_message_ffa()
         except Exception as exc:
             print(f"Live refresh failed: {exc}")
         await asyncio.sleep(REFRESH_MINUTES * 60)
@@ -746,6 +1021,7 @@ async def on_ready():
         print(f"Command sync error: {exc}")
 
     bot.add_view(LeaderboardView(1, 20))
+    bot.add_view(LeaderboardFfaView(1, 20))
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
     print(f"Bot connected: {bot.user}")
@@ -764,7 +1040,7 @@ async def setleaderboard(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
-
+    
     embed = await build_leaderboard_embed(interaction.guild, 1, 20)
     if not embed:
         await interaction.response.send_message(
@@ -772,10 +1048,74 @@ async def setleaderboard(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
-
+    
     await interaction.response.send_message(embed=embed, view=LeaderboardView(1, 20))
     message = await interaction.original_response()
     await set_leaderboard_message(interaction.guild.id, interaction.channel_id, message.id)
+
+
+@bot.tree.command(name="register", description="Enregistre un joueur pour le leaderboard FFA.")
+@app_commands.describe(pseudo="Pseudo sans tag Discord (#)", player_id="OpenFront player ID")
+async def register(interaction: discord.Interaction, pseudo: str, player_id: str):
+    if not is_pseudo_valid(pseudo):
+        await interaction.response.send_message("Pseudo invalide (pas de #).", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await upsert_ffa_player(interaction.user.id, pseudo, player_id)
+        sessions = await fetch_player_sessions(player_id)
+        wins, losses = compute_ffa_stats_from_sessions(sessions)
+        await upsert_ffa_stats(player_id, pseudo, wins, losses)
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
+        return
+    await interaction.followup.send(f"✅ {pseudo} enregistré pour le leaderboard FFA.", ephemeral=True)
+
+
+@bot.tree.command(name="setleaderboardffa", description="Show the FFA leaderboard.")
+async def setleaderboardffa(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+
+    record = await get_leaderboard_message_ffa(interaction.guild.id)
+    if record:
+        await interaction.response.send_message(
+            "Un leaderboard FFA est déjà actif. Utilise /removeleaderboardffa.",
+            ephemeral=True,
+        )
+        return
+
+    embed = await build_leaderboard_ffa_embed(interaction.guild, 1, 20)
+    if not embed:
+        await interaction.response.send_message(
+            f"Aucune donnée FFA. Enregistre-toi avec /register.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(embed=embed, view=LeaderboardFfaView(1, 20))
+    message = await interaction.original_response()
+    await set_leaderboard_message_ffa(interaction.guild.id, interaction.channel_id, message.id)
+
+
+@bot.tree.command(name="removeleaderboardffa", description="Supprime le leaderboard FFA du serveur.")
+async def removeleaderboardffa(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    record = await get_leaderboard_message_ffa(interaction.guild.id)
+    if not record:
+        await interaction.response.send_message("Aucun leaderboard FFA actif.", ephemeral=True)
+        return
+    try:
+        channel = bot.get_channel(record["channel_id"]) or await bot.fetch_channel(record["channel_id"])
+        message = await channel.fetch_message(record["message_id"])
+        await message.delete()
+    except Exception:
+        pass
+    await clear_leaderboard_message_ffa(interaction.guild.id)
+    await interaction.response.send_message("Leaderboard FFA supprimé.", ephemeral=True)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
