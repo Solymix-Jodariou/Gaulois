@@ -31,7 +31,7 @@ USER_AGENT = "Mozilla/5.0 (GauloisBot/1.1)"
 OPENFRONT_API_KEY = os.getenv("OPENFRONT_API_KEY")
 ONEV1_LEADERBOARD_URL = os.getenv(
     "OPENFRONT_1V1_LEADERBOARD_URL",
-    "https://api.openfront.io/leaderboard/1v1/ranked",
+    "https://api.openfront.io/leaderboard/ranked",
 )
 
 REFRESH_MINUTES = int(os.getenv("LEADERBOARD_REFRESH_MINUTES", "30"))
@@ -1267,6 +1267,9 @@ def _normalize_1v1_entry(entry):
     name = _get_first_value(entry, ["username", "player", "name", "displayName", "user"])
     if not name:
         return None
+    clan_tag = entry.get("clanTag")
+    if clan_tag and f"[{clan_tag}]".upper() not in str(name).upper():
+        name = f"[{clan_tag}] {name}"
     elo = _get_first_value(entry, ["elo", "rating", "mmr", "score"])
     wins = _get_first_value(entry, ["wins", "win", "victories"], 0)
     losses = _get_first_value(entry, ["losses", "loss", "defeats"], 0)
@@ -1294,20 +1297,29 @@ def _normalize_1v1_entry(entry):
 
 async def fetch_official_1v1_leaderboard(limit: int):
     headers = build_api_headers()
-    params = {"limit": str(limit), "offset": "0"}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(ONEV1_LEADERBOARD_URL, params=params, timeout=25) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
-            payload = await resp.json()
-    raw_items = _extract_list(payload)
     items = []
-    for entry in raw_items:
-        norm = _normalize_1v1_entry(entry)
-        if norm:
-            items.append(norm)
-    return items
+    page = 1
+    async with aiohttp.ClientSession(headers=headers) as session:
+        while len(items) < limit:
+            params = {"page": str(page)}
+            async with session.get(ONEV1_LEADERBOARD_URL, params=params, timeout=25) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+                payload = await resp.json()
+            raw_items = payload.get("1v1") or payload.get("oneVone") or _extract_list(payload)
+            if not raw_items:
+                break
+            for entry in raw_items:
+                norm = _normalize_1v1_entry(entry)
+                if norm:
+                    items.append(norm)
+                    if len(items) >= limit:
+                        break
+            if len(raw_items) < 50:
+                break
+            page += 1
+    return items[:limit]
 
 
 async def get_official_1v1_leaderboard_cached(limit: int):
