@@ -430,7 +430,7 @@ async def build_leaderboard_embed(guild):
         return None
 
     embed = discord.Embed(
-        title=f"🏆 Leaderboard {CLAN_DISPLAY}",
+        title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 100",
         color=discord.Color.orange(),
     )
 
@@ -441,20 +441,16 @@ async def build_leaderboard_embed(guild):
     total_players = len(top)
 
     embed.description = (
-        f"👥 {total_players}  •  ✅ {total_wins}  •  ❌ {total_losses}  •  "
-        f"🎮 min {MIN_GAMES}"
+        f"**Joueurs:** {total_players}  |  "
+        f"**Wins:** {total_wins}  |  "
+        f"**Losses:** {total_losses}  |  "
+        f"**Min games:** {MIN_GAMES}  |  "
+        f"**Score:** ratio*{SCORE_RATIO_WEIGHT} + games*{SCORE_GAMES_WEIGHT}"
     )
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    medals = ["🥇", "🥈", "🥉"]
-    top_lines = []
-    for idx, p in enumerate(top[:3]):
-        score = f"{p['score']:.1f}"
-        team = f"{p['wins_team']}W/{p['losses_team']}L"
-        top_lines.append(f"{medals[idx]} {p['display_name']} • {score} • {team}")
-
-    name_width = 12
+    name_width = 14
 
     def truncate_name(name: str) -> str:
         if len(name) <= name_width:
@@ -482,29 +478,44 @@ async def build_leaderboard_embed(guild):
         games = f"{player['total_games']}"
         return f"{rank:<3} {username:<{name_width}} {score:>5}  {team:>7}  {games:>3}"
 
-    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'S':>4} {'T':>7} {'G':>3}"
-    sep = "-" * (name_width + 19)
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'TEAM':>7} {'G':>3}"
+    sep = "-" * (name_width + 22)
 
+    col_top = [header, sep]
     col1 = [header, sep]
     col2 = [header, sep]
     col3 = [header, sep]
+    col4 = [header, sep]
+    col5 = [header, sep]
+
+    # Top 1-3 in same table style
+    for i, p in enumerate(top[:3], 1):
+        col_top.append(format_line(i, p))
 
     for i, p in enumerate(top[3:], 4):
-        if i <= 36:
+        if i <= 23:
             col1.append(format_line(i, p))
-        elif i <= 69:
+        elif i <= 43:
             col2.append(format_line(i, p))
-        else:
+        elif i <= 63:
             col3.append(format_line(i, p))
+        elif i <= 83:
+            col4.append(format_line(i, p))
+        else:
+            col5.append(format_line(i, p))
 
-    if top_lines:
-        embed.add_field(name="Top 3", value="\n".join(top_lines), inline=False)
+    if len(col_top) > 2:
+        embed.add_field(name="Top 1-3", value="```\n" + "\n".join(col_top) + "\n```", inline=False)
     if len(col1) > 2:
-        embed.add_field(name="4-36", value="```\n" + "\n".join(col1) + "\n```", inline=False)
+        embed.add_field(name="Top 4-23", value="```\n" + "\n".join(col1) + "\n```", inline=False)
     if len(col2) > 2:
-        embed.add_field(name="37-69", value="```\n" + "\n".join(col2) + "\n```", inline=False)
+        embed.add_field(name="Top 24-43", value="```\n" + "\n".join(col2) + "\n```", inline=False)
     if len(col3) > 2:
-        embed.add_field(name="70-100", value="```\n" + "\n".join(col3) + "\n```", inline=False)
+        embed.add_field(name="Top 44-63", value="```\n" + "\n".join(col3) + "\n```", inline=False)
+    if len(col4) > 2:
+        embed.add_field(name="Top 64-83", value="```\n" + "\n".join(col4) + "\n```", inline=False)
+    if len(col5) > 2:
+        embed.add_field(name="Top 84-100", value="```\n" + "\n".join(col5) + "\n```", inline=False)
 
     if last_updated:
         try:
