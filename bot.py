@@ -305,6 +305,16 @@ async def debug_api(interaction: discord.Interaction):
         )
 
 
+@bot.tree.command(name="refresh_leaderboard", description="Force un refresh du leaderboard.")
+async def refresh_leaderboard_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await refresh_leaderboard()
+        await interaction.followup.send("OK: leaderboard mis à jour.", ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
+
+
 if __name__ == "__main__":
     if not TOKEN:
         raise ValueError("DISCORD_TOKEN missing.")
