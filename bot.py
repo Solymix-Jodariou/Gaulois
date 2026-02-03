@@ -19,7 +19,11 @@ DB_URL = (
 
 CLAN_TAG = os.getenv("CLAN_TAG", "GAL")
 CLAN_DISPLAY = f"[{CLAN_TAG}]"
-MERGE_PREFIXES = [p.strip().upper() for p in os.getenv("LEADERBOARD_MERGE_PREFIXES", "PRINCE").split(",") if p.strip()]
+MERGE_PREFIXES = [
+    p.strip().upper()
+    for p in os.getenv("LEADERBOARD_MERGE_PREFIXES", "PRINCE,ELP").split(",")
+    if p.strip()
+]
 
 API_BASE = "https://api.openfront.io/public"
 USER_AGENT = "Mozilla/5.0 (GauloisBot)"
@@ -97,6 +101,7 @@ def normalize_username(raw: str) -> str:
     name = re.sub(r"[^\w\s]", " ", name, flags=re.UNICODE)
     name = name.replace("_", " ")
     name = re.sub(r"\s+", " ", name).strip()
+    # Merge cases like "El p" + "SOR"/"YER" by removing spaces for the key
     return name
 
 
@@ -109,12 +114,13 @@ def build_display_name(raw: str) -> str:
 
 def merge_prefix_key(base_name: str):
     if not base_name:
-        return None
+                return None
     upper = base_name.upper()
+    upper_no_space = re.sub(r"\s+", "", upper)
     for prefix in MERGE_PREFIXES:
-        if upper.startswith(prefix):
+        if upper.startswith(prefix) or upper_no_space.startswith(prefix):
             return prefix
-    return None
+            return None
 
 
 async def init_db():
@@ -431,7 +437,7 @@ def process_game(info, clan_has_won):
         elif is_team:
             if clan_has_won:
                 asyncio.create_task(upsert_player(username_key, display_name, 0, 0, 1, 0))
-            else:
+    else:
                 asyncio.create_task(upsert_player(username_key, display_name, 0, 0, 0, 1))
 
 
@@ -570,7 +576,7 @@ async def setleaderboard(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
-
+    
     embed = discord.Embed(
         title=f"🏆 Leaderboard {CLAN_DISPLAY} - Top 100",
         color=discord.Color.orange(),
@@ -764,5 +770,5 @@ if __name__ == "__main__":
         raise ValueError("DISCORD_TOKEN missing.")
     if not DB_URL:
         raise ValueError("DATABASE_URL missing (Postgres).")
-    bot.run(TOKEN)
+bot.run(TOKEN)
 
