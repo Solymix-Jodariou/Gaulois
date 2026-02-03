@@ -5,7 +5,8 @@ import json
 from datetime import datetime
 
 # Configuration
-TOKEN = ''
+import os
+TOKEN = os.getenv('DISCORD_TOKEN')  # prend la variable d'environnement
 TAG_CLAN = 'GAL'
 API_BASE = 'https://api.openfront.io'
 
