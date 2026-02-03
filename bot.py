@@ -218,6 +218,11 @@ async def help_command(ctx):
         inline=False
     )
     embed.add_field(
+        name="!stats_me",
+        value="Affiche tes stats (via Player ID enregistré)",
+        inline=False
+    )
+    embed.add_field(
         name="!unregister",
         value="Supprime ton pseudo enregistré",
         inline=False
@@ -317,6 +322,11 @@ async def stats_id(ctx, player_id: str = None):
         json_str = json_str[:1900] + "\n...\n(tronqué)"
 
     await ctx.send(f"```json\n{json_str}\n```")
+
+@bot.command(name='stats_me')
+async def stats_me(ctx):
+    """Affiche les stats du Player ID enregistré"""
+    await stats_id(ctx, None)
 
 @bot.command(name='stats_gal')
 async def stats_gal(ctx):
