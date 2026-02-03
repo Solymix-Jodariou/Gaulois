@@ -25,6 +25,13 @@ async def on_ready():
     print(f'📊 Serveurs : {len(bot.guilds)}')
     for guild in bot.guilds:
         print(f'  - {guild.name} ({guild.id})')
+    
+    # Charge le module OpenFront API
+    try:
+        await bot.load_extension('openfront_api')
+        print('✅ Module OpenFront API chargé !')
+    except Exception as e:
+        print(f'⚠️ Module OpenFront non chargé : {e}')
 
 @bot.command(name='register')
 async def register(ctx, *, openfront_pseudo: str):
