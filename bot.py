@@ -28,6 +28,11 @@ MERGE_PREFIXES = [
 
 API_BASE = "https://api.openfront.io/public"
 USER_AGENT = "Mozilla/5.0 (GauloisBot)"
+OPENFRONT_API_KEY = os.getenv("OPENFRONT_API_KEY")
+ONEV1_LEADERBOARD_URL = os.getenv(
+    "OPENFRONT_1V1_LEADERBOARD_URL",
+    "https://api.openfront.io/leaderboard/1v1/ranked",
+)
 
 REFRESH_MINUTES = int(os.getenv("LEADERBOARD_REFRESH_MINUTES", "30"))
 RANGE_HOURS = int(os.getenv("LEADERBOARD_RANGE_HOURS", "24"))
@@ -72,6 +77,7 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 pool = None
+ONEV1_CACHE = {"items": [], "fetched_at": None}
 
 
 def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
@@ -110,6 +116,14 @@ def compute_ffa_stats_from_sessions(sessions):
             else:
                 losses += 1
     return wins, losses
+
+
+def build_api_headers():
+    headers = {"User-Agent": USER_AGENT}
+    if OPENFRONT_API_KEY:
+        headers["X-API-Key"] = OPENFRONT_API_KEY
+        headers["Authorization"] = f"Bearer {OPENFRONT_API_KEY}"
+    return headers
 
 
 def is_clan_username(username: str) -> bool:
@@ -768,33 +782,8 @@ async def upsert_1v1_stats(username: str, wins: int, losses: int):
 
 
 async def load_1v1_leaderboard():
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT username, wins, losses, updated_at FROM player_stats_1v1"
-        )
-    players = []
-    last_updated = None
-    for row in rows:
-        wins = row[1]
-        losses = row[2]
-        games = wins + losses
-        ratio = (wins / games) if games > 0 else 0.0
-        score = calculate_score(wins, losses, games)
-        players.append(
-            {
-                "display_name": row[0],
-                "wins": wins,
-                "losses": losses,
-                "games": games,
-                "ratio": ratio,
-                "score": score,
-            }
-        )
-        if row[3] and (last_updated is None or row[3] > last_updated):
-            last_updated = row[3]
-    players = [p for p in players if p["games"] >= MIN_GAMES]
-    players.sort(key=lambda p: (p["score"], p["games"]), reverse=True)
-    return players[:100], last_updated
+    items, fetched_at = await get_official_1v1_leaderboard_cached(100)
+    return items, fetched_at
 
 
 async def load_ffa_leaderboard():
@@ -903,38 +892,36 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
     page_items = top[start:end]
 
     embed = discord.Embed(
-        title=f"🥇 Leaderboard 1v1 OpenFront — Page {page}/{total_pages}",
+        title=f"🥇 Leaderboard 1v1 OpenFront — Top 100 — Page {page}/{total_pages}",
         color=discord.Color.orange(),
     )
 
-    total_wins = sum(p["wins"] for p in top)
-    total_losses = sum(p["losses"] for p in top)
-    embed.description = f"**Wins:** {total_wins}  |  **Losses:** {total_losses}"
+    total_games = sum(p.get("games", 0) for p in top)
+    embed.description = f"**Joueurs:** {len(top)}  |  **Games:** {total_games}"
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    name_width = 16
-
-    def truncate_name(name: str) -> str:
-        if len(name) <= name_width:
-            return name
-        return name[: name_width - 3] + "..."
-
-    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'W/L':>7} {'G':>3}"
-    sep = "-" * (name_width + 22)
-    table = [header, sep]
+    lines = []
     for i, p in enumerate(page_items, start + 1):
-        name = truncate_name(p["display_name"])
-        score = f"{p['score']:.1f}"
-        wl = f"{p['wins']}W/{p['losses']}L"
-        games = f"{p['games']}"
-        table.append(f"{i:<3} {name:<{name_width}} {score:>5} {wl:>7} {games:>3}")
+        name = p.get("name") or "Unknown"
+        elo = p.get("elo")
+        games = p.get("games", 0)
+        ratio_pct = p.get("ratio_pct")
+        is_gal = is_clan_username(name)
+        if is_gal:
+            name = f"**{name}**"
+        elo_text = f"ELO {int(elo)}" if isinstance(elo, (int, float)) else "ELO ?"
+        ratio_text = f"{ratio_pct:.1f}%" if isinstance(ratio_pct, (int, float)) else "?"
+        lines.append(f"{i}. {name} — {elo_text} | {games} games | {ratio_text}")
 
-    embed.add_field(name="Classement 1v1", value="```\n" + "\n".join(table) + "\n```", inline=False)
+    embed.add_field(name="Classement 1v1", value="\n".join(lines), inline=False)
 
     if last_updated:
         try:
-            last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            if isinstance(last_updated, datetime):
+                last_dt = last_updated
+            else:
+                last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             next_dt = last_dt + timedelta(minutes=ONEV1_REFRESH_MINUTES)
             footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
         except Exception:
@@ -1258,6 +1245,83 @@ async def fetch_games_list(session, start_iso: str, end_iso: str, max_games: int
         if len(batch) < limit:
             break
     return games
+
+
+def _extract_list(payload):
+    if isinstance(payload, list):
+        return payload
+    for key in ("items", "data", "players", "leaderboard", "results"):
+        if isinstance(payload, dict) and isinstance(payload.get(key), list):
+            return payload[key]
+    return []
+
+
+def _get_first_value(entry, keys, default=None):
+    for key in keys:
+        if key in entry and entry[key] is not None:
+            return entry[key]
+    return default
+
+
+def _normalize_1v1_entry(entry):
+    name = _get_first_value(entry, ["username", "player", "name", "displayName", "user"])
+    if not name:
+        return None
+    elo = _get_first_value(entry, ["elo", "rating", "mmr", "score"])
+    wins = _get_first_value(entry, ["wins", "win", "victories"], 0)
+    losses = _get_first_value(entry, ["losses", "loss", "defeats"], 0)
+    games = _get_first_value(entry, ["games", "matches", "totalGames", "played"])
+    if games is None:
+        games = (wins or 0) + (losses or 0)
+    ratio = _get_first_value(entry, ["winRate", "winrate", "ratio", "winLossRatio"])
+    if ratio is None and games:
+        ratio = (wins / games) if games > 0 else 0.0
+    if isinstance(ratio, (int, float)) and ratio <= 1.0:
+        ratio_pct = ratio * 100
+    elif isinstance(ratio, (int, float)):
+        ratio_pct = float(ratio)
+    else:
+        ratio_pct = None
+    return {
+        "name": str(name),
+        "elo": elo,
+        "games": int(games) if games is not None else 0,
+        "wins": int(wins) if wins is not None else 0,
+        "losses": int(losses) if losses is not None else 0,
+        "ratio_pct": ratio_pct,
+    }
+
+
+async def fetch_official_1v1_leaderboard(limit: int):
+    headers = build_api_headers()
+    params = {"limit": str(limit), "offset": "0"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(ONEV1_LEADERBOARD_URL, params=params, timeout=25) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+            payload = await resp.json()
+    raw_items = _extract_list(payload)
+    items = []
+    for entry in raw_items:
+        norm = _normalize_1v1_entry(entry)
+        if norm:
+            items.append(norm)
+    return items
+
+
+async def get_official_1v1_leaderboard_cached(limit: int):
+    now = datetime.now(timezone.utc)
+    cached_at = ONEV1_CACHE.get("fetched_at")
+    cached_items = ONEV1_CACHE.get("items") or []
+    if cached_items and cached_at:
+        age = (now - cached_at).total_seconds()
+        if age < ONEV1_REFRESH_MINUTES * 60:
+            return cached_items[:limit], cached_at
+    items = await fetch_official_1v1_leaderboard(limit)
+    ONEV1_CACHE["items"] = items
+    ONEV1_CACHE["fetched_at"] = now
+    return items[:limit], now
 
 
 async def refresh_from_range(start_dt, end_dt):
