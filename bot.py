@@ -77,8 +77,12 @@ def normalize_username(raw: str) -> str:
         return ""
     name = raw.strip()
     tag = re.escape(CLAN_TAG)
-    name = re.sub(rf"\[{tag}\]", "", name, flags=re.IGNORECASE)
-    name = re.sub(rf"^{tag}\s+", "", name, flags=re.IGNORECASE)
+    # Remove tag variations anywhere
+    name = re.sub(rf"\[{tag}\]", " ", name, flags=re.IGNORECASE)
+    name = re.sub(rf"\b{tag}\b", " ", name, flags=re.IGNORECASE)
+    # Keep only letters/numbers/spaces, collapse spaces
+    name = re.sub(r"[^\w\s]", " ", name, flags=re.UNICODE)
+    name = name.replace("_", " ")
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
