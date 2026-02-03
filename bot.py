@@ -1,6 +1,7 @@
 ﻿import os
 import json
 import asyncio
+import re
 from datetime import datetime, timezone, timedelta
 
 import aiohttp
@@ -71,6 +72,24 @@ def game_mode(info):
     return (info.get("config", {}) or {}).get("gameMode") or ""
 
 
+def normalize_username(raw: str) -> str:
+    if not raw:
+        return ""
+    name = raw.strip()
+    tag = re.escape(CLAN_TAG)
+    name = re.sub(rf"\[{tag}\]", "", name, flags=re.IGNORECASE)
+    name = re.sub(rf"^{tag}\s+", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+
+def build_display_name(raw: str) -> str:
+    base = normalize_username(raw)
+    if not base:
+        return CLAN_DISPLAY
+    return f"{CLAN_DISPLAY} {base}"
+
+
 async def init_db():
     global pool
     if not DB_URL:
@@ -81,6 +100,7 @@ async def init_db():
             """
             CREATE TABLE IF NOT EXISTS player_stats (
                 username TEXT PRIMARY KEY,
+                display_name TEXT,
                 wins_ffa INTEGER DEFAULT 0,
                 losses_ffa INTEGER DEFAULT 0,
                 wins_team INTEGER DEFAULT 0,
@@ -89,6 +109,12 @@ async def init_db():
             )
             """
         )
+        columns = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='player_stats'"
+        )
+        colset = {c["column_name"] for c in columns}
+        if "display_name" not in colset:
+            await conn.execute("ALTER TABLE player_stats ADD COLUMN display_name TEXT")
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS processed_games (
@@ -188,21 +214,23 @@ async def mark_game_processed(game_id: str):
         )
 
 
-async def upsert_player(username, wins_ffa, losses_ffa, wins_team, losses_team):
+async def upsert_player(username_key, display_name, wins_ffa, losses_ffa, wins_team, losses_team):
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO player_stats (
-                username, wins_ffa, losses_ffa, wins_team, losses_team, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+                username, display_name, wins_ffa, losses_ffa, wins_team, losses_team, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT(username) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
                 wins_ffa = player_stats.wins_ffa + EXCLUDED.wins_ffa,
                 losses_ffa = player_stats.losses_ffa + EXCLUDED.losses_ffa,
                 wins_team = player_stats.wins_team + EXCLUDED.wins_team,
                 losses_team = player_stats.losses_team + EXCLUDED.losses_team,
                 updated_at = EXCLUDED.updated_at
             """,
-            username,
+            username_key,
+            display_name,
             wins_ffa,
             losses_ffa,
             wins_team,
@@ -215,31 +243,33 @@ async def load_leaderboard():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT username, wins_ffa, losses_ffa, wins_team, losses_team, updated_at
+            SELECT username, display_name, wins_ffa, losses_ffa, wins_team, losses_team, updated_at
             FROM player_stats
             """
         )
     players = []
     last_updated = None
     for row in rows:
-        ratio = calculate_ratio(row[1], row[2], row[3], row[4])
-        total_wins = row[1] + row[3]
-        total_losses = row[2] + row[4]
+        ratio = calculate_ratio(row[2], row[3], row[4], row[5])
+        total_wins = row[2] + row[4]
+        total_losses = row[3] + row[5]
         total_games = total_wins + total_losses
+        display_name = row[1] or row[0]
         players.append(
             {
                 "username": row[0],
-                "wins_ffa": row[1],
-                "losses_ffa": row[2],
-                "wins_team": row[3],
-                "losses_team": row[4],
+                "display_name": display_name,
+                "wins_ffa": row[2],
+                "losses_ffa": row[3],
+                "wins_team": row[4],
+                "losses_team": row[5],
                 "ratio": ratio,
                 "total_wins": total_wins,
                 "total_games": total_games,
             }
         )
-        if row[5]:
-            last_updated = row[5]
+        if row[6]:
+            last_updated = row[6]
     players.sort(
         key=lambda p: (
             p["total_games"] >= MIN_GAMES,
@@ -295,20 +325,25 @@ def process_game(info, clan_has_won):
     is_team = "team" in mode
 
     for p in info.get("players", []):
-        username = p.get("username") or ""
-        if not is_clan_username(username):
+        username_raw = p.get("username") or ""
+        if not is_clan_username(username_raw):
             continue
+        username_base = normalize_username(username_raw)
+        if not username_base:
+            continue
+        username_key = username_base.upper()
+        display_name = build_display_name(username_raw)
 
         if is_ffa:
             if clan_has_won:
-                asyncio.create_task(upsert_player(username, 1, 0, 0, 0))
+                asyncio.create_task(upsert_player(username_key, display_name, 1, 0, 0, 0))
             else:
-                asyncio.create_task(upsert_player(username, 0, 1, 0, 0))
+                asyncio.create_task(upsert_player(username_key, display_name, 0, 1, 0, 0))
         elif is_team:
             if clan_has_won:
-                asyncio.create_task(upsert_player(username, 0, 0, 1, 0))
+                asyncio.create_task(upsert_player(username_key, display_name, 0, 0, 1, 0))
             else:
-                asyncio.create_task(upsert_player(username, 0, 0, 0, 1))
+                asyncio.create_task(upsert_player(username_key, display_name, 0, 0, 0, 1))
 
 
 async def fetch_clan_sessions(session, start_iso, end_iso):
@@ -471,7 +506,7 @@ async def setleaderboard(interaction: discord.Interaction):
         ratio = f"{p['ratio']:.2f}"
         total_games = p["total_games"]
         embed.add_field(
-            name=f"{medals[idx]} {p['username']}",
+            name=f"{medals[idx]} {p['display_name']}",
             value=(
                 f"Ratio: **{ratio}**\n"
                 f"TEAM: `{p['wins_team']}W / {p['losses_team']}L`\n"
@@ -481,7 +516,7 @@ async def setleaderboard(interaction: discord.Interaction):
         )
 
     def format_line(rank, player):
-        username = player["username"][:14]
+        username = player["display_name"][:14]
         ratio = f"{player['ratio']:.2f}"
         team = f"{player['wins_team']}W/{player['losses_team']}L"
         games = f"{player['total_games']}"
