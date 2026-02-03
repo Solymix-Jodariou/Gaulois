@@ -97,10 +97,21 @@ async def init_db():
                 cursor TEXT NOT NULL,
                 completed BOOLEAN NOT NULL DEFAULT FALSE,
                 last_attempt TEXT,
-                last_error TEXT
+                last_error TEXT,
+                last_sessions INTEGER DEFAULT 0,
+                last_games_processed INTEGER DEFAULT 0
             )
             """
         )
+        # Migrations (Postgres)
+        columns = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='backfill_state'"
+        )
+        colset = {c["column_name"] for c in columns}
+        if "last_sessions" not in colset:
+            await conn.execute("ALTER TABLE backfill_state ADD COLUMN last_sessions INTEGER DEFAULT 0")
+        if "last_games_processed" not in colset:
+            await conn.execute("ALTER TABLE backfill_state ADD COLUMN last_games_processed INTEGER DEFAULT 0")
         await conn.execute(
             """
             INSERT INTO backfill_state (id, cursor, completed)
@@ -114,27 +125,43 @@ async def init_db():
 async def get_backfill_state():
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT cursor, completed, last_attempt, last_error FROM backfill_state WHERE id = 1"
+            """
+            SELECT cursor, completed, last_attempt, last_error, last_sessions, last_games_processed
+            FROM backfill_state WHERE id = 1
+            """
         )
-    return row[0], bool(row[1]), row[2], row[3]
+    return row[0], bool(row[1]), row[2], row[3], row[4], row[5]
 
 
-async def set_backfill_state(cursor, completed, last_attempt=None, last_error=None):
+async def set_backfill_state(
+    cursor,
+    completed,
+    last_attempt=None,
+    last_error=None,
+    last_sessions=0,
+    last_games_processed=0,
+):
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO backfill_state (id, cursor, completed, last_attempt, last_error)
-            VALUES (1, $1, $2, $3, $4)
+            INSERT INTO backfill_state (
+                id, cursor, completed, last_attempt, last_error, last_sessions, last_games_processed
+            )
+            VALUES (1, $1, $2, $3, $4, $5, $6)
             ON CONFLICT (id) DO UPDATE SET
                 cursor = EXCLUDED.cursor,
                 completed = EXCLUDED.completed,
                 last_attempt = EXCLUDED.last_attempt,
-                last_error = EXCLUDED.last_error
+                last_error = EXCLUDED.last_error,
+                last_sessions = EXCLUDED.last_sessions,
+                last_games_processed = EXCLUDED.last_games_processed
             """,
             cursor,
             completed,
             last_attempt,
             last_error,
+            last_sessions,
+            last_games_processed,
         )
 
 
@@ -296,6 +323,7 @@ async def refresh_from_range(start_dt, end_dt):
         sessions = await fetch_clan_sessions(session, start_iso, end_iso)
         sessions = sessions[:MAX_SESSIONS]
 
+        processed_in_step = 0
         for s in sessions:
             game_id = s.get("gameId")
             if not game_id:
@@ -309,12 +337,13 @@ async def refresh_from_range(start_dt, end_dt):
             clan_has_won = bool(s.get("hasWon"))
             process_game(info, clan_has_won)
             await mark_game_processed(game_id)
+            processed_in_step += 1
 
-        return len(sessions)
+        return len(sessions), processed_in_step
 
 
 async def run_backfill_step():
-    cursor, completed, _last_attempt, _last_error = await get_backfill_state()
+    cursor, completed, _last_attempt, _last_error, _last_sessions, _last_games = await get_backfill_state()
     if completed:
         return {"status": "done", "cursor": cursor}
 
@@ -332,16 +361,23 @@ async def run_backfill_step():
     last_error = None
 
     try:
-        await refresh_from_range(start_dt, end_dt)
+        last_sessions, last_games_processed = await refresh_from_range(start_dt, end_dt)
     except Exception as exc:
         last_error = str(exc)[:500]
-        await set_backfill_state(cursor, False, last_attempt, last_error)
+        await set_backfill_state(cursor, False, last_attempt, last_error, 0, 0)
         print(f"Backfill failed: {exc}")
         return {"status": "error", "cursor": cursor, "error": last_error}
 
     new_cursor = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     completed = end_dt >= now_dt
-    await set_backfill_state(new_cursor, completed, last_attempt, last_error)
+    await set_backfill_state(
+        new_cursor,
+        completed,
+        last_attempt,
+        last_error,
+        last_sessions,
+        last_games_processed,
+    )
     print(f"Backfill step: {cursor} -> {new_cursor} (done={completed})")
     return {"status": "ok", "cursor": new_cursor, "completed": completed}
 
@@ -440,13 +476,15 @@ async def backfill_step_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="debug_api", description="Debug OpenFront API.")
 async def debug_api(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    cursor, completed, last_attempt, last_error = await get_backfill_state()
+    cursor, completed, last_attempt, last_error, last_sessions, last_games = await get_backfill_state()
     msg = (
         f"Tag: {CLAN_TAG}\n"
         f"Backfill cursor: {cursor}\n"
         f"Backfill done: {completed}\n"
         f"Last attempt: {last_attempt}\n"
         f"Last error: {last_error}\n"
+        f"Last sessions: {last_sessions}\n"
+        f"Last games processed: {last_games}\n"
         f"Range hours: {RANGE_HOURS}\n"
         f"Refresh minutes: {REFRESH_MINUTES}\n"
         f"Backfill interval minutes: {BACKFILL_INTERVAL_MINUTES}"
@@ -457,7 +495,7 @@ async def debug_api(interaction: discord.Interaction):
 @bot.tree.command(name="stats_progress", description="Affiche la progression du backfill.")
 async def stats_progress(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    cursor, completed, last_attempt, last_error = await get_backfill_state()
+    cursor, completed, last_attempt, last_error, last_sessions, last_games = await get_backfill_state()
     stats = await get_progress_stats()
     eta = compute_next_backfill_eta(last_attempt)
     msg = (
@@ -465,6 +503,8 @@ async def stats_progress(interaction: discord.Interaction):
         f"Backfill done: {completed}\n"
         f"Last attempt: {last_attempt}\n"
         f"Last error: {last_error}\n"
+        f"Derniere tranche sessions: {last_sessions}\n"
+        f"Derniere tranche games: {last_games}\n"
         f"Prochaine tranche dans: {eta}\n"
         f"Games traitees: {stats['games_processed']}\n"
         f"Joueurs connus: {stats['players']}\n"
