@@ -1867,6 +1867,43 @@ async def win_notify_loop():
         await asyncio.sleep(WIN_NOTIFY_POLL_SECONDS)
 
 
+async def run_win_notify_once(force_empty: bool = False):
+    if not WIN_NOTIFY_CHANNEL_ID:
+        return {"status": "error", "error": "WIN_NOTIFY_CHANNEL_ID missing"}
+    channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(int(WIN_NOTIFY_CHANNEL_ID))
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(hours=WIN_NOTIFY_RANGE_HOURS)
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    headers = {"User-Agent": USER_AGENT}
+    notified_any = False
+    async with aiohttp.ClientSession(headers=headers) as session:
+        sessions = await fetch_clan_sessions(session, start_iso, end_iso)
+        for s in sessions:
+            if not s.get("hasWon"):
+                continue
+            game_id = s.get("gameId")
+            if not game_id:
+                continue
+            if await is_win_notified(game_id):
+                continue
+            try:
+                info = await fetch_game_info(session, game_id)
+            except Exception:
+                continue
+            embed = build_win_embed(info)
+            await channel.send(embed=embed)
+            await mark_win_notified(game_id)
+            notified_any = True
+
+    if not notified_any and force_empty:
+        await channel.send(
+            f"Aucune victoire {CLAN_DISPLAY} sur les {WIN_NOTIFY_RANGE_HOURS} dernières heures."
+        )
+    return {"status": "ok", "notified": notified_any}
+
+
 @bot.event
 async def on_ready():
     await init_db()
@@ -2075,6 +2112,23 @@ async def removeleaderboard1v1gal(interaction: discord.Interaction):
         pass
     await clear_leaderboard_message_1v1_gal(interaction.guild.id)
     await interaction.response.send_message("Leaderboard 1v1 [GAL] supprimé.", ephemeral=True)
+
+
+@bot.tree.command(name="checkwinsgal", description="Force un check des victoires [GAL].")
+async def checkwinsgal(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        result = await run_win_notify_once(force_empty=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
+        return
+    if result.get("status") != "ok":
+        await interaction.followup.send(f"Erreur: {result.get('error')}", ephemeral=True)
+        return
+    if result.get("notified"):
+        await interaction.followup.send("✅ Victoires envoyées dans le salon.", ephemeral=True)
+    else:
+        await interaction.followup.send("✅ Check terminé (aucune victoire).", ephemeral=True)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
