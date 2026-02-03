@@ -71,36 +71,48 @@ def init_db():
             CREATE TABLE IF NOT EXISTS backfill_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 cursor TEXT NOT NULL,
-                completed INTEGER DEFAULT 0
+                completed INTEGER DEFAULT 0,
+                last_attempt TEXT,
+                last_error TEXT
             )
             """
         )
+        # Migrations for older tables
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(backfill_state)").fetchall()}
+        if "last_attempt" not in columns:
+            conn.execute("ALTER TABLE backfill_state ADD COLUMN last_attempt TEXT")
+        if "last_error" not in columns:
+            conn.execute("ALTER TABLE backfill_state ADD COLUMN last_error TEXT")
 
 
 def get_backfill_state():
     with get_db() as conn:
         row = conn.execute(
-            "SELECT cursor, completed FROM backfill_state WHERE id = 1"
+            "SELECT cursor, completed, last_attempt, last_error FROM backfill_state WHERE id = 1"
         ).fetchone()
     if row:
-        return row[0], bool(row[1])
+        return row[0], bool(row[1]), row[2], row[3]
     with get_db() as conn:
         conn.execute(
             "INSERT INTO backfill_state (id, cursor, completed) VALUES (1, ?, 0)",
             (BACKFILL_START,),
         )
-    return BACKFILL_START, False
+    return BACKFILL_START, False, None, None
 
 
-def set_backfill_state(cursor, completed):
+def set_backfill_state(cursor, completed, last_attempt=None, last_error=None):
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO backfill_state (id, cursor, completed)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, completed = excluded.completed
+            INSERT INTO backfill_state (id, cursor, completed, last_attempt, last_error)
+            VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                cursor = excluded.cursor,
+                completed = excluded.completed,
+                last_attempt = excluded.last_attempt,
+                last_error = excluded.last_error
             """,
-            (cursor, 1 if completed else 0),
+            (cursor, 1 if completed else 0, last_attempt, last_error),
         )
 
 
@@ -264,7 +276,7 @@ async def refresh_from_range(start_dt, end_dt):
 
 async def backfill_loop():
     while True:
-        cursor, completed = get_backfill_state()
+        cursor, completed, _last_attempt, _last_error = get_backfill_state()
         if completed:
             await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
             continue
@@ -281,15 +293,30 @@ async def backfill_loop():
 
         try:
             await refresh_from_range(start_dt, end_dt)
+            last_attempt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            last_error = None
         except Exception as exc:
             print(f"Backfill failed: {exc}")
+            last_attempt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            last_error = str(exc)[:500]
             await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
+            set_backfill_state(cursor, False, last_attempt, last_error)
             continue
 
         if end_dt >= now_dt:
-            set_backfill_state(end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), True)
+            set_backfill_state(
+                end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                True,
+                last_attempt,
+                last_error,
+            )
         else:
-            set_backfill_state(end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), False)
+            set_backfill_state(
+                end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                False,
+                last_attempt,
+                last_error,
+            )
 
         await asyncio.sleep(BACKFILL_INTERVAL_MINUTES * 60)
 
@@ -373,11 +400,13 @@ async def refresh_leaderboard_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="debug_api", description="Debug OpenFront API.")
 async def debug_api(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    cursor, completed = get_backfill_state()
+    cursor, completed, last_attempt, last_error = get_backfill_state()
     msg = (
         f"Tag: {CLAN_TAG}\n"
         f"Backfill cursor: {cursor}\n"
         f"Backfill done: {completed}\n"
+        f"Last attempt: {last_attempt}\n"
+        f"Last error: {last_error}\n"
         f"Range hours: {RANGE_HOURS}\n"
         f"Refresh minutes: {REFRESH_MINUTES}\n"
         f"Backfill interval minutes: {BACKFILL_INTERVAL_MINUTES}"
