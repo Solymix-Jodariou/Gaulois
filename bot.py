@@ -436,14 +436,14 @@ async def setleaderboard(interaction: discord.Interaction):
     )
 
     lines = []
-    lines.append(f"{'#':<3} {'JOUEUR':<18} {'RATIO':>5}  {'FFA':>9}  {'TEAM':>9}")
-    lines.append("-" * 52)
+    lines.append(f"{'#':<3} {'JOUEUR':<14} {'RATIO':>5}  {'FFA':>7}  {'TEAM':>7}")
+    lines.append("-" * 44)
     for i, p in enumerate(players[:30], 1):
-        username = p["username"][:18]
+        username = p["username"][:14]
         ratio = f"{p['ratio']:.2f}"
         ffa = f"{p['wins_ffa']}W/{p['losses_ffa']}L"
         team = f"{p['wins_team']}W/{p['losses_team']}L"
-        lines.append(f"{i:<3} {username:<18} {ratio:>5}  {ffa:>9}  {team:>9}")
+        lines.append(f"{i:<3} {username:<14} {ratio:>5}  {ffa:>7}  {team:>7}")
 
     embed.description = "```\n" + "\n".join(lines) + "\n```"
     embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
