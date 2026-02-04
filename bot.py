@@ -32,7 +32,7 @@ USER_AGENT = "Mozilla/5.0 (GauloisBot/1.1)"
 OPENFRONT_API_KEY = os.getenv("OPENFRONT_API_KEY")
 OPENFRONT_GAME_URL_TEMPLATE = os.getenv(
     "OPENFRONT_GAME_URL_TEMPLATE",
-    "https://openfront.app/#/game/{game_id}",
+    "https://openfront.io/#/game/{game_id}",
 )
 ONEV1_LEADERBOARD_URL = os.getenv(
     "OPENFRONT_1V1_LEADERBOARD_URL",
