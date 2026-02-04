@@ -162,6 +162,22 @@ def compute_ffa_stats_from_sessions(sessions):
     return wins, losses
 
 
+def is_ffa_session(session: dict) -> bool:
+    mode = (session.get("gameMode") or session.get("mode") or "").lower()
+    return "free for all" in mode or mode == "ffa"
+
+
+def get_session_game_id(session: dict) -> Optional[str]:
+    return session.get("gameId") or session.get("game") or session.get("id")
+
+
+def get_session_time(session: dict) -> Optional[datetime]:
+    for key in ("end", "endTime", "start", "startTime", "createdAt"):
+        if key in session and session.get(key) is not None:
+            return parse_openfront_time(session.get(key))
+    return None
+
+
 def build_api_headers():
     headers = {"User-Agent": USER_AGENT}
     if OPENFRONT_API_KEY:
@@ -374,6 +390,47 @@ def build_win_embed(info):
     return embed
 
 
+def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str):
+    mode = session.get("gameMode") or session.get("mode") or "FFA"
+    end_raw = session.get("end") or session.get("endTime")
+    start_raw = session.get("start") or session.get("startTime")
+
+    game_url = None
+    if game_id:
+        try:
+            game_url = OPENFRONT_GAME_URL_TEMPLATE.format(game_id=game_id)
+        except Exception:
+            game_url = None
+
+    display_name = f"★ {pseudo}" if is_clan_username(pseudo) else pseudo
+    embed = discord.Embed(
+        title=f"🏆 Victoire FFA — {display_name}",
+        url=game_url,
+        description="Victoire FFA détectée via /register",
+        color=discord.Color.orange(),
+    )
+    embed.add_field(name="Player ID", value=str(player_id), inline=True)
+    embed.add_field(name="Mode", value=str(mode), inline=True)
+
+    footer_time = None
+    if end_raw:
+        end_dt = parse_openfront_time(end_raw)
+        if end_dt:
+            footer_time = format_local_time(end_dt)
+        else:
+            footer_time = str(end_raw)
+    elif start_raw:
+        start_dt = parse_openfront_time(start_raw)
+        if start_dt:
+            footer_time = format_local_time(start_dt)
+        else:
+            footer_time = str(start_raw)
+    if footer_time:
+        embed.add_field(name="Heure victoire", value=footer_time, inline=True)
+        embed.set_footer(text=f"Mis à jour le {footer_time}")
+    return embed
+
+
 async def fetch_player_sessions(player_id: str):
     url = f"{API_BASE}/player/{player_id}/sessions"
     headers = {"User-Agent": USER_AGENT}
@@ -505,6 +562,16 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS win_notifications (
                 game_id TEXT PRIMARY KEY,
                 notified_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ffa_win_notifications (
+                player_id TEXT NOT NULL,
+                game_id TEXT NOT NULL,
+                notified_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (player_id, game_id)
             )
             """
         )
@@ -1044,6 +1111,29 @@ async def mark_win_notified(game_id: str):
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO win_notifications (game_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            game_id,
+        )
+
+
+async def is_ffa_win_notified(player_id: str, game_id: str) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM ffa_win_notifications WHERE player_id = $1 AND game_id = $2",
+            player_id,
+            game_id,
+        )
+    return row is not None
+
+
+async def mark_ffa_win_notified(player_id: str, game_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ffa_win_notifications (player_id, game_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            """,
+            player_id,
             game_id,
         )
 
@@ -2070,8 +2160,10 @@ async def win_notify_loop():
     while True:
         stats = {
             "sessions": 0,
-            "wins": 0,
-            "sent": 0,
+            "wins_team": 0,
+            "wins_ffa": 0,
+            "sent_team": 0,
+            "sent_ffa": 0,
             "skipped_notified": 0,
             "missing_game_id": 0,
             "fetch_errors": 0,
@@ -2103,14 +2195,45 @@ async def win_notify_loop():
                         continue
                     if not clan_won_game(info):
                         continue
-                    stats["wins"] += 1
+                    stats["wins_team"] += 1
                     if bootstrap:
                         await mark_win_notified(game_id)
                         continue
                     embed = build_win_embed(info)
                     await channel.send(embed=embed)
                     await mark_win_notified(game_id)
-                    stats["sent"] += 1
+                    stats["sent_team"] += 1
+
+                ffa_players = await get_ffa_players()
+                for _discord_id, pseudo, player_id in ffa_players:
+                    try:
+                        player_sessions = await fetch_player_sessions(player_id)
+                    except Exception:
+                        stats["fetch_errors"] += 1
+                        continue
+                    for ps in player_sessions:
+                        if not is_ffa_session(ps):
+                            continue
+                        if not ps.get("hasWon"):
+                            continue
+                        session_time = get_session_time(ps)
+                        if session_time and session_time < start_dt:
+                            continue
+                        game_id = get_session_game_id(ps)
+                        if not game_id:
+                            stats["missing_game_id"] += 1
+                            continue
+                        if await is_ffa_win_notified(player_id, game_id):
+                            stats["skipped_notified"] += 1
+                            continue
+                        stats["wins_ffa"] += 1
+                        if bootstrap:
+                            await mark_ffa_win_notified(player_id, game_id)
+                            continue
+                        embed = build_ffa_win_embed(pseudo, player_id, ps, game_id)
+                        await channel.send(embed=embed)
+                        await mark_ffa_win_notified(player_id, game_id)
+                        stats["sent_ffa"] += 1
         except Exception as exc:
             error_text = str(exc)[:500]
             print(f"Win notify failed: {exc}")
@@ -2119,8 +2242,8 @@ async def win_notify_loop():
             await set_last_win_notify_stats(
                 scan_at,
                 stats["sessions"],
-                stats["wins"],
-                stats["sent"],
+                stats["wins_team"] + stats["wins_ffa"],
+                stats["sent_team"] + stats["sent_ffa"],
                 stats["skipped_notified"],
                 stats["missing_game_id"],
                 stats["fetch_errors"],
@@ -2143,8 +2266,10 @@ async def run_win_notify_once(force_empty: bool = False):
     notified_any = False
     stats = {
         "sessions": 0,
-        "wins": 0,
-        "sent": 0,
+        "wins_team": 0,
+        "wins_ffa": 0,
+        "sent_team": 0,
+        "sent_ffa": 0,
         "skipped_notified": 0,
         "missing_game_id": 0,
         "fetch_errors": 0,
@@ -2168,19 +2293,48 @@ async def run_win_notify_once(force_empty: bool = False):
                 continue
             if not clan_won_game(info):
                 continue
-            stats["wins"] += 1
+            stats["wins_team"] += 1
             embed = build_win_embed(info)
             await channel.send(embed=embed)
             await mark_win_notified(game_id)
             notified_any = True
-            stats["sent"] += 1
+            stats["sent_team"] += 1
+
+        ffa_players = await get_ffa_players()
+        for _discord_id, pseudo, player_id in ffa_players:
+            try:
+                player_sessions = await fetch_player_sessions(player_id)
+            except Exception:
+                stats["fetch_errors"] += 1
+                continue
+            for ps in player_sessions:
+                if not is_ffa_session(ps):
+                    continue
+                if not ps.get("hasWon"):
+                    continue
+                session_time = get_session_time(ps)
+                if session_time and session_time < start_dt:
+                    continue
+                game_id = get_session_game_id(ps)
+                if not game_id:
+                    stats["missing_game_id"] += 1
+                    continue
+                if await is_ffa_win_notified(player_id, game_id):
+                    stats["skipped_notified"] += 1
+                    continue
+                stats["wins_ffa"] += 1
+                embed = build_ffa_win_embed(pseudo, player_id, ps, game_id)
+                await channel.send(embed=embed)
+                await mark_ffa_win_notified(player_id, game_id)
+                notified_any = True
+                stats["sent_ffa"] += 1
 
     scan_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     await set_last_win_notify_stats(
         scan_at,
         stats["sessions"],
-        stats["wins"],
-        stats["sent"],
+        stats["wins_team"] + stats["wins_ffa"],
+        stats["sent_team"] + stats["sent_ffa"],
         stats["skipped_notified"],
         stats["missing_game_id"],
         stats["fetch_errors"],
@@ -2410,21 +2564,23 @@ async def checkwinsgal(interaction: discord.Interaction):
     if result.get("status") != "ok":
         await interaction.followup.send(f"Erreur: {result.get('error')}", ephemeral=True)
         return
-    wins = result.get("wins", 0)
-    sent = result.get("sent", 0)
+    wins_team = result.get("wins_team", 0)
+    wins_ffa = result.get("wins_ffa", 0)
+    sent_team = result.get("sent_team", 0)
+    sent_ffa = result.get("sent_ffa", 0)
     skipped = result.get("skipped_notified", 0)
     missing = result.get("missing_game_id", 0)
     errors = result.get("fetch_errors", 0)
-    if sent > 0:
+    if sent_team + sent_ffa > 0:
         message = (
-            f"✅ Victoires envoyées: {sent}.\n"
-            f"Total victoires dans la fenêtre: {wins}.\n"
+            f"✅ Team envoyées: {sent_team} | FFA envoyées: {sent_ffa}.\n"
+            f"Total Team: {wins_team} | Total FFA: {wins_ffa}.\n"
             f"Déjà notifiées: {skipped}."
         )
     else:
         message = (
             "❌ Aucune nouvelle victoire à envoyer.\n"
-            f"Total victoires dans la fenêtre: {wins}.\n"
+            f"Total Team: {wins_team} | Total FFA: {wins_ffa}.\n"
             f"Déjà notifiées: {skipped}.\n"
             f"Sans gameId: {missing} | Erreurs fetch: {errors}."
         )
@@ -2456,11 +2612,12 @@ async def resetwinsnotify(interaction: discord.Interaction):
     try:
         async with pool.acquire() as conn:
             await conn.execute("TRUNCATE TABLE win_notifications")
+            await conn.execute("TRUNCATE TABLE ffa_win_notifications")
     except Exception as exc:
         await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
         return
     await interaction.followup.send(
-        "✅ Notifications réinitialisées. Les prochaines scans renverront les victoires dans la fenêtre.",
+        "✅ Notifications réinitialisées (Team + FFA). Les prochains scans renverront les victoires dans la fenêtre.",
         ephemeral=True,
     )
 
