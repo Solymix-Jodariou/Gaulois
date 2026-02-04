@@ -2387,6 +2387,21 @@ async def winscanstatus(interaction: discord.Interaction):
     await interaction.followup.send(message, ephemeral=True)
 
 
+@bot.tree.command(name="resetwinsnotify", description="Réinitialise les victoires déjà notifiées.")
+async def resetwinsnotify(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE TABLE win_notifications")
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
+        return
+    await interaction.followup.send(
+        "✅ Notifications réinitialisées. Les prochaines scans renverront les victoires dans la fenêtre.",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="winsessionsdebug", description="Debug sessions clan [GAL] (fenêtre de scan).")
 async def winsessionsdebug(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
