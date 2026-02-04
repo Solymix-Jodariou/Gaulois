@@ -119,6 +119,33 @@ def format_local_time(dt: datetime) -> str:
     return local_dt.strftime("%Y-%m-%d %H:%M")
 
 
+def parse_openfront_time(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        ts = int(value)
+        if ts > 1_000_000_000_000:
+            return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        if ts > 1_000_000_000:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            ts = int(raw)
+            if ts > 1_000_000_000_000:
+                return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            if ts > 1_000_000_000:
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    return None
+
+
 def is_pseudo_valid(pseudo: str) -> bool:
     return "#" not in pseudo
 
@@ -329,16 +356,16 @@ def build_win_embed(info):
 
     footer_time = None
     if end_raw:
-        try:
-            end_dt = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        end_dt = parse_openfront_time(end_raw)
+        if end_dt:
             footer_time = format_local_time(end_dt)
-        except Exception:
+        else:
             footer_time = str(end_raw)
     elif start_raw:
-        try:
-            start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        start_dt = parse_openfront_time(start_raw)
+        if start_dt:
             footer_time = format_local_time(start_dt)
-        except Exception:
+        else:
             footer_time = str(start_raw)
     if footer_time:
         embed.add_field(name="Heure victoire", value=footer_time, inline=True)
