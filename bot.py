@@ -2421,6 +2421,39 @@ async def winsessionsdebug(interaction: discord.Interaction):
     await interaction.followup.send(message, ephemeral=True)
 
 
+@bot.tree.command(name="wingamedebug", description="Debug une game OpenFront par ID.")
+@app_commands.describe(game_id="ID de la game OpenFront")
+async def wingamedebug(interaction: discord.Interaction, game_id: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
+            info = await fetch_game_info(session, game_id)
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur API: {exc}", ephemeral=True)
+        return
+
+    winner_raw = info.get("winner")
+    winners_ids = sorted(get_winner_client_ids(info))
+    mode = game_mode(info) or "?"
+    teams = (info.get("config", {}) or {}).get("playerTeams") or "?"
+
+    players = []
+    for p in info.get("players", [])[:12]:
+        username = p.get("username") or "?"
+        client_id = p.get("clientID") or "?"
+        players.append(f"{username}({client_id})")
+    players_text = ", ".join(players) if players else "Aucun joueur"
+
+    message = (
+        f"Game: {game_id}\n"
+        f"Mode: {mode} | playerTeams: {teams}\n"
+        f"Winner raw: {str(winner_raw)[:200]}\n"
+        f"Winner IDs: {winners_ids}\n"
+        f"Players: {players_text}"
+    )
+    await interaction.followup.send(message, ephemeral=True)
+
+
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
 async def refresh_leaderboard_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
