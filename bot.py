@@ -2393,21 +2393,25 @@ async def winsessionsdebug(interaction: discord.Interaction):
     total = len(sessions)
     wins = sum(1 for s in sessions if s.get("hasWon"))
     samples = []
-    for s in sessions[:5]:
-        game_id = s.get("gameId") or "?"
-        has_won = s.get("hasWon")
-        mode = s.get("gameMode") or s.get("mode") or "?"
-        start = s.get("start") or s.get("startTime") or "?"
-        gal_won = "?"
-        if game_id != "?":
-            try:
-                info = await fetch_game_info(session, game_id)
-                gal_won = clan_won_game(info)
-            except Exception:
-                gal_won = "err"
-        samples.append(
-            f"- gameId={game_id} | hasWon={has_won} | galWon={gal_won} | mode={mode} | start={start}"
-        )
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as game_session:
+            for s in sessions[:5]:
+                game_id = s.get("gameId") or "?"
+                has_won = s.get("hasWon")
+                mode = s.get("gameMode") or s.get("mode") or "?"
+                start = s.get("start") or s.get("startTime") or "?"
+                gal_won = "?"
+                if game_id != "?":
+                    try:
+                        info = await fetch_game_info(game_session, game_id)
+                        gal_won = clan_won_game(info)
+                    except Exception as exc:
+                        gal_won = f"err:{str(exc)[:60]}"
+                samples.append(
+                    f"- gameId={game_id} | hasWon={has_won} | galWon={gal_won} | mode={mode} | start={start}"
+                )
+    except Exception as exc:
+        samples.append(f"- erreur fetch game info: {exc}")
     sample_text = "\n".join(samples) if samples else "Aucune session."
     message = (
         f"Fenêtre: {start_iso} → {end_iso}\n"
