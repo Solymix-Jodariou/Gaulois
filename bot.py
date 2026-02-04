@@ -426,10 +426,38 @@ async def init_db():
             """
             CREATE TABLE IF NOT EXISTS win_notify_state (
                 id INTEGER PRIMARY KEY,
-                last_empty_at TEXT
+                last_empty_at TEXT,
+                last_scan_at TEXT,
+                last_scan_sessions INTEGER DEFAULT 0,
+                last_scan_wins INTEGER DEFAULT 0,
+                last_scan_sent INTEGER DEFAULT 0,
+                last_scan_skipped INTEGER DEFAULT 0,
+                last_scan_missing_game_id INTEGER DEFAULT 0,
+                last_scan_fetch_errors INTEGER DEFAULT 0,
+                last_scan_error TEXT
             )
             """
         )
+        columns = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='win_notify_state'"
+        )
+        colset = {c["column_name"] for c in columns}
+        if "last_scan_at" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_at TEXT")
+        if "last_scan_sessions" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_sessions INTEGER DEFAULT 0")
+        if "last_scan_wins" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_wins INTEGER DEFAULT 0")
+        if "last_scan_sent" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_sent INTEGER DEFAULT 0")
+        if "last_scan_skipped" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_skipped INTEGER DEFAULT 0")
+        if "last_scan_missing_game_id" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_missing_game_id INTEGER DEFAULT 0")
+        if "last_scan_fetch_errors" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_fetch_errors INTEGER DEFAULT 0")
+        if "last_scan_error" not in colset:
+            await conn.execute("ALTER TABLE win_notify_state ADD COLUMN last_scan_error TEXT")
         await conn.execute(
             """
             INSERT INTO win_notify_state (id)
@@ -954,6 +982,82 @@ async def set_last_empty_notify(value: str):
             value,
         )
 
+
+async def set_last_win_notify_stats(
+    scan_at: str,
+    sessions: int,
+    wins: int,
+    sent: int,
+    skipped: int,
+    missing_game_id: int,
+    fetch_errors: int,
+    error: Optional[str] = None,
+):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO win_notify_state (
+                id,
+                last_scan_at,
+                last_scan_sessions,
+                last_scan_wins,
+                last_scan_sent,
+                last_scan_skipped,
+                last_scan_missing_game_id,
+                last_scan_fetch_errors,
+                last_scan_error
+            )
+            VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (id) DO UPDATE SET
+                last_scan_at = EXCLUDED.last_scan_at,
+                last_scan_sessions = EXCLUDED.last_scan_sessions,
+                last_scan_wins = EXCLUDED.last_scan_wins,
+                last_scan_sent = EXCLUDED.last_scan_sent,
+                last_scan_skipped = EXCLUDED.last_scan_skipped,
+                last_scan_missing_game_id = EXCLUDED.last_scan_missing_game_id,
+                last_scan_fetch_errors = EXCLUDED.last_scan_fetch_errors,
+                last_scan_error = EXCLUDED.last_scan_error
+            """,
+            scan_at,
+            sessions,
+            wins,
+            sent,
+            skipped,
+            missing_game_id,
+            fetch_errors,
+            error,
+        )
+
+
+async def get_last_win_notify_stats():
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                last_scan_at,
+                last_scan_sessions,
+                last_scan_wins,
+                last_scan_sent,
+                last_scan_skipped,
+                last_scan_missing_game_id,
+                last_scan_fetch_errors,
+                last_scan_error
+            FROM win_notify_state
+            WHERE id = 1
+            """
+        )
+    if not row:
+        return None
+    return {
+        "last_scan_at": row[0],
+        "sessions": row[1],
+        "wins": row[2],
+        "sent": row[3],
+        "skipped": row[4],
+        "missing_game_id": row[5],
+        "fetch_errors": row[6],
+        "error": row[7],
+    }
 
 async def upsert_1v1_stats(username: str, wins: int, losses: int):
     async with pool.acquire() as conn:
@@ -1878,6 +1982,15 @@ async def win_notify_loop():
         return
     bootstrap = True
     while True:
+        stats = {
+            "sessions": 0,
+            "wins": 0,
+            "sent": 0,
+            "skipped_notified": 0,
+            "missing_game_id": 0,
+            "fetch_errors": 0,
+        }
+        error_text = None
         try:
             channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(int(WIN_NOTIFY_CHANNEL_ID))
             end_dt = datetime.now(timezone.utc)
@@ -1888,14 +2001,17 @@ async def win_notify_loop():
             headers = {"User-Agent": USER_AGENT}
             async with aiohttp.ClientSession(headers=headers) as session:
                 sessions = await fetch_clan_sessions(session, start_iso, end_iso)
-                notified_any = False
+                stats["sessions"] = len(sessions)
                 for s in sessions:
                     if not s.get("hasWon"):
                         continue
+                    stats["wins"] += 1
                     game_id = s.get("gameId")
                     if not game_id:
+                        stats["missing_game_id"] += 1
                         continue
                     if await is_win_notified(game_id):
+                        stats["skipped_notified"] += 1
                         continue
                     if bootstrap:
                         await mark_win_notified(game_id)
@@ -1903,13 +2019,27 @@ async def win_notify_loop():
                     try:
                         info = await fetch_game_info(session, game_id)
                     except Exception:
+                        stats["fetch_errors"] += 1
                         continue
                     embed = build_win_embed(info)
                     await channel.send(embed=embed)
                     await mark_win_notified(game_id)
-                    notified_any = True
+                    stats["sent"] += 1
         except Exception as exc:
+            error_text = str(exc)[:500]
             print(f"Win notify failed: {exc}")
+        finally:
+            scan_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            await set_last_win_notify_stats(
+                scan_at,
+                stats["sessions"],
+                stats["wins"],
+                stats["sent"],
+                stats["skipped_notified"],
+                stats["missing_game_id"],
+                stats["fetch_errors"],
+                error_text,
+            )
         bootstrap = False
         await asyncio.sleep(WIN_NOTIFY_POLL_SECONDS)
 
@@ -1933,6 +2063,7 @@ async def run_win_notify_once(force_empty: bool = False):
         "missing_game_id": 0,
         "fetch_errors": 0,
     }
+    error_text = None
     async with aiohttp.ClientSession(headers=headers) as session:
         sessions = await fetch_clan_sessions(session, start_iso, end_iso)
         stats["sessions"] = len(sessions)
@@ -1958,6 +2089,17 @@ async def run_win_notify_once(force_empty: bool = False):
             notified_any = True
             stats["sent"] += 1
 
+    scan_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    await set_last_win_notify_stats(
+        scan_at,
+        stats["sessions"],
+        stats["wins"],
+        stats["sent"],
+        stats["skipped_notified"],
+        stats["missing_game_id"],
+        stats["fetch_errors"],
+        error_text,
+    )
     return {"status": "ok", "notified": notified_any, **stats}
 
 
@@ -2200,6 +2342,25 @@ async def checkwinsgal(interaction: discord.Interaction):
             f"Déjà notifiées: {skipped}.\n"
             f"Sans gameId: {missing} | Erreurs fetch: {errors}."
         )
+    await interaction.followup.send(message, ephemeral=True)
+
+
+@bot.tree.command(name="winscanstatus", description="Affiche le dernier scan auto des victoires [GAL].")
+async def winscanstatus(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    stats = await get_last_win_notify_stats()
+    if not stats:
+        await interaction.followup.send("Aucun scan enregistré.", ephemeral=True)
+        return
+    scan_at = stats["last_scan_at"] or "inconnu"
+    message = (
+        f"Dernier scan: {scan_at}\n"
+        f"Sessions: {stats['sessions']} | Wins: {stats['wins']} | Envoyées: {stats['sent']}\n"
+        f"Déjà notifiées: {stats['skipped']} | Sans gameId: {stats['missing_game_id']} | "
+        f"Erreurs fetch: {stats['fetch_errors']}"
+    )
+    if stats.get("error"):
+        message += f"\nErreur: {stats['error']}"
     await interaction.followup.send(message, ephemeral=True)
 
 
