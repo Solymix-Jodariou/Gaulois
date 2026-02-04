@@ -2217,7 +2217,9 @@ async def win_notify_loop():
                         if not ps.get("hasWon"):
                             continue
                         session_time = get_session_time(ps)
-                        if session_time and session_time < start_dt:
+                        if not session_time:
+                            continue
+                        if session_time < start_dt or session_time > end_dt:
                             continue
                         game_id = get_session_game_id(ps)
                         if not game_id:
@@ -2313,7 +2315,9 @@ async def run_win_notify_once(force_empty: bool = False):
                 if not ps.get("hasWon"):
                     continue
                 session_time = get_session_time(ps)
-                if session_time and session_time < start_dt:
+                if not session_time:
+                    continue
+                if session_time < start_dt or session_time > end_dt:
                     continue
                 game_id = get_session_game_id(ps)
                 if not game_id:
