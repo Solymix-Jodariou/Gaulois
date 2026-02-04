@@ -160,9 +160,13 @@ def get_winner_client_ids(info):
     if not winner or not isinstance(winner, list) or len(winner) < 3:
         return set()
     winners = winner[2]
-    if not isinstance(winners, list):
-        return set()
-    return set(winners)
+    if isinstance(winners, list):
+        return set(winners)
+    # Format observed: ["team", "Purple", "id1", "id2", ...]
+    tail = winner[2:]
+    if all(isinstance(x, str) for x in tail):
+        return set(tail)
+    return set()
 
 
 def is_1v1_game(info):
