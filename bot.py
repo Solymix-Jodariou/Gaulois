@@ -192,6 +192,18 @@ def extract_gal_players(info):
     return sorted(set(names))
 
 
+def clan_won_game(info) -> bool:
+    winners = get_winner_client_ids(info)
+    if not winners:
+        return False
+    gal_clients = {
+        p.get("clientID")
+        for p in info.get("players", [])
+        if is_clan_username(p.get("username") or "")
+    }
+    return bool(winners & gal_clients)
+
+
 def extract_clan_tag_from_player(player: dict) -> Optional[str]:
     tag = player.get("clanTag")
     if tag:
@@ -2003,9 +2015,6 @@ async def win_notify_loop():
                 sessions = await fetch_clan_sessions(session, start_iso, end_iso)
                 stats["sessions"] = len(sessions)
                 for s in sessions:
-                    if not s.get("hasWon"):
-                        continue
-                    stats["wins"] += 1
                     game_id = s.get("gameId")
                     if not game_id:
                         stats["missing_game_id"] += 1
@@ -2013,13 +2022,16 @@ async def win_notify_loop():
                     if await is_win_notified(game_id):
                         stats["skipped_notified"] += 1
                         continue
-                    if bootstrap:
-                        await mark_win_notified(game_id)
-                        continue
                     try:
                         info = await fetch_game_info(session, game_id)
                     except Exception:
                         stats["fetch_errors"] += 1
+                        continue
+                    if not clan_won_game(info):
+                        continue
+                    stats["wins"] += 1
+                    if bootstrap:
+                        await mark_win_notified(game_id)
                         continue
                     embed = build_win_embed(info)
                     await channel.send(embed=embed)
@@ -2068,9 +2080,6 @@ async def run_win_notify_once(force_empty: bool = False):
         sessions = await fetch_clan_sessions(session, start_iso, end_iso)
         stats["sessions"] = len(sessions)
         for s in sessions:
-            if not s.get("hasWon"):
-                continue
-            stats["wins"] += 1
             game_id = s.get("gameId")
             if not game_id:
                 stats["missing_game_id"] += 1
@@ -2083,6 +2092,9 @@ async def run_win_notify_once(force_empty: bool = False):
             except Exception:
                 stats["fetch_errors"] += 1
                 continue
+            if not clan_won_game(info):
+                continue
+            stats["wins"] += 1
             embed = build_win_embed(info)
             await channel.send(embed=embed)
             await mark_win_notified(game_id)
@@ -2386,7 +2398,16 @@ async def winsessionsdebug(interaction: discord.Interaction):
         has_won = s.get("hasWon")
         mode = s.get("gameMode") or s.get("mode") or "?"
         start = s.get("start") or s.get("startTime") or "?"
-        samples.append(f"- gameId={game_id} | hasWon={has_won} | mode={mode} | start={start}")
+        gal_won = "?"
+        if game_id != "?":
+            try:
+                info = await fetch_game_info(session, game_id)
+                gal_won = clan_won_game(info)
+            except Exception:
+                gal_won = "err"
+        samples.append(
+            f"- gameId={game_id} | hasWon={has_won} | galWon={gal_won} | mode={mode} | start={start}"
+        )
     sample_text = "\n".join(samples) if samples else "Aucune session."
     message = (
         f"Fenêtre: {start_iso} → {end_iso}\n"
