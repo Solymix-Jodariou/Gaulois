@@ -2364,6 +2364,38 @@ async def winscanstatus(interaction: discord.Interaction):
     await interaction.followup.send(message, ephemeral=True)
 
 
+@bot.tree.command(name="winsessionsdebug", description="Debug sessions clan [GAL] (fenêtre de scan).")
+async def winsessionsdebug(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(hours=WIN_NOTIFY_RANGE_HOURS)
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
+            sessions = await fetch_clan_sessions(session, start_iso, end_iso)
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur API: {exc}", ephemeral=True)
+        return
+
+    total = len(sessions)
+    wins = sum(1 for s in sessions if s.get("hasWon"))
+    samples = []
+    for s in sessions[:5]:
+        game_id = s.get("gameId") or "?"
+        has_won = s.get("hasWon")
+        mode = s.get("gameMode") or s.get("mode") or "?"
+        start = s.get("start") or s.get("startTime") or "?"
+        samples.append(f"- gameId={game_id} | hasWon={has_won} | mode={mode} | start={start}")
+    sample_text = "\n".join(samples) if samples else "Aucune session."
+    message = (
+        f"Fenêtre: {start_iso} → {end_iso}\n"
+        f"Sessions: {total} | Wins: {wins}\n"
+        f"{sample_text}"
+    )
+    await interaction.followup.send(message, ephemeral=True)
+
+
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
 async def refresh_leaderboard_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
