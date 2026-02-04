@@ -280,13 +280,42 @@ def build_win_embed(info):
         description=f"{CLAN_DISPLAY} vient de gagner une partie !",
         color=discord.Color.orange(),
     )
-    if winners:
+
+    winners_by_id = {
+        p.get("clientID"): p for p in info.get("players", []) if p.get("clientID")
+    }
+    winner_ids = get_winner_client_ids(info)
+    winner_players = [winners_by_id.get(cid) for cid in winner_ids if winners_by_id.get(cid)]
+
+    if winner_players:
+        name_width = 22
+
+        def format_winner_row(player):
+            username = player.get("username") or "Unknown"
+            name = username if len(username) <= name_width else username[: name_width - 3] + "..."
+            marker = "★" if is_clan_player(player) else " "
+            return f"{marker} {name}"
+
+        lines = [format_winner_row(p) for p in winner_players[:12]]
+        more = len(winner_players) - len(lines)
+        if more > 0:
+            lines.append(f"... +{more}")
+        embed.add_field(
+            name="Gagnants (★ = [GAL])",
+            value="```\n" + "\n".join(lines) + "\n```",
+            inline=True,
+        )
+    elif winners:
         shown = winners[:12]
         more = len(winners) - len(shown)
-        lines = [f"?? {name}" for name in shown]
+        lines = [f"★ {name}" if is_clan_username(name) else f"  {name}" for name in shown]
         if more > 0:
-            lines.append(f"+{more} autre(s)")
-        embed.add_field(name="Gagnants", value="\n".join(lines), inline=True)
+            lines.append(f"... +{more}")
+        embed.add_field(
+            name="Gagnants (★ = [GAL])",
+            value="```\n" + "\n".join(lines) + "\n```",
+            inline=True,
+        )
     else:
         embed.add_field(name="Gagnants", value=CLAN_DISPLAY, inline=True)
 
@@ -305,7 +334,14 @@ def build_win_embed(info):
             footer_time = format_local_time(end_dt)
         except Exception:
             footer_time = str(end_raw)
+    elif start_raw:
+        try:
+            start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            footer_time = format_local_time(start_dt)
+        except Exception:
+            footer_time = str(start_raw)
     if footer_time:
+        embed.add_field(name="Heure victoire", value=footer_time, inline=True)
         embed.set_footer(text=f"Mis � jour le {footer_time}")
 
     return embed
