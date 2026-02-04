@@ -2,6 +2,7 @@
 import json
 import asyncio
 import re
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 import aiohttp
@@ -29,6 +30,10 @@ MERGE_PREFIXES = [
 API_BASE = "https://api.openfront.io/public"
 USER_AGENT = "Mozilla/5.0 (GauloisBot/1.1)"
 OPENFRONT_API_KEY = os.getenv("OPENFRONT_API_KEY")
+OPENFRONT_GAME_URL_TEMPLATE = os.getenv(
+    "OPENFRONT_GAME_URL_TEMPLATE",
+    "https://openfront.app/#/game/{game_id}",
+)
 ONEV1_LEADERBOARD_URL = os.getenv(
     "OPENFRONT_1V1_LEADERBOARD_URL",
     "https://api.openfront.io/leaderboard/ranked",
@@ -187,39 +192,98 @@ def extract_gal_players(info):
     return sorted(set(names))
 
 
+def extract_clan_tag_from_player(player: dict) -> Optional[str]:
+    tag = player.get("clanTag")
+    if tag:
+        return f"[{str(tag).upper()}]"
+    username = player.get("username") or ""
+    match = re.search(r"\[([A-Za-z0-9]+)\]", username)
+    if match:
+        return f"[{match.group(1).upper()}]"
+    return None
+
+
+def extract_winner_names(info):
+    winners = get_winner_client_ids(info)
+    names = []
+    for p in info.get("players", []):
+        if winners and p.get("clientID") not in winners:
+            continue
+        username = p.get("username") or p.get("name") or p.get("player") or ""
+        if username:
+            names.append(username)
+    if not names:
+        names = extract_gal_players(info)
+    seen = set()
+    ordered = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def extract_opponent_clans(info):
+    winners = get_winner_client_ids(info)
+    tags = []
+    for p in info.get("players", []):
+        if winners and p.get("clientID") in winners:
+            continue
+        tag = extract_clan_tag_from_player(p)
+        if not tag or tag.upper() == CLAN_DISPLAY.upper():
+            continue
+        tags.append(tag.upper())
+    return sorted(set(tags))
+
+
 def build_win_embed(info):
     mode = game_mode(info) or "Team"
     start_raw = info.get("start")
     end_raw = info.get("end")
-    gal_players = extract_gal_players(info)
     game_id = info.get("gameID") or "?"
+    winners = extract_winner_names(info)
+    opponent_clans = extract_opponent_clans(info)
+
+    game_url = None
+    if game_id and game_id != "?":
+        try:
+            game_url = OPENFRONT_GAME_URL_TEMPLATE.format(game_id=game_id)
+        except Exception:
+            game_url = None
 
     embed = discord.Embed(
-        title=f"✅ Victoire {CLAN_DISPLAY}",
-        color=discord.Color.green(),
+        title=f"🏆 OpenFront Game {game_id}",
+        url=game_url,
+        description=f"{CLAN_DISPLAY} vient de gagner une partie !",
+        color=discord.Color.orange(),
     )
+    if winners:
+        shown = winners[:12]
+        more = len(winners) - len(shown)
+        lines = [f"?? {name}" for name in shown]
+        if more > 0:
+            lines.append(f"+{more} autre(s)")
+        embed.add_field(name="Gagnants", value="\n".join(lines), inline=True)
+    else:
+        embed.add_field(name="Gagnants", value=CLAN_DISPLAY, inline=True)
+
+    if opponent_clans:
+        clans_text = " ".join(opponent_clans)
+        embed.add_field(name="Clans affront�s", value=clans_text, inline=True)
+    else:
+        embed.add_field(name="Clans affront�s", value="Aucun tag d�tect�", inline=True)
+
     embed.add_field(name="Mode", value=str(mode), inline=True)
-    embed.add_field(name="Game ID", value=str(game_id), inline=True)
-    if start_raw:
-        try:
-            start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-            embed.add_field(name="Début", value=format_local_time(start_dt), inline=True)
-        except Exception:
-            embed.add_field(name="Début", value=str(start_raw), inline=True)
+
+    footer_time = None
     if end_raw:
         try:
             end_dt = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
-            embed.add_field(name="Fin", value=format_local_time(end_dt), inline=True)
+            footer_time = format_local_time(end_dt)
         except Exception:
-            embed.add_field(name="Fin", value=str(end_raw), inline=True)
-
-    if gal_players:
-        shown = gal_players[:10]
-        more = len(gal_players) - len(shown)
-        players_text = ", ".join(shown)
-        if more > 0:
-            players_text += f" (+{more})"
-        embed.add_field(name="Joueurs [GAL]", value=players_text, inline=False)
+            footer_time = str(end_raw)
+    if footer_time:
+        embed.set_footer(text=f"Mis � jour le {footer_time}")
 
     return embed
 
@@ -731,7 +795,7 @@ async def build_leaderboard_embed(guild, page: int, page_size: int):
     page_items = top[start:end]
 
     embed = discord.Embed(
-        title=f"🏆 Leaderboard {CLAN_DISPLAY} — Page {page}/{total_pages}",
+        title=f"?? Leaderboard {CLAN_DISPLAY} � Page {page}/{total_pages}",
         color=discord.Color.orange(),
     )
     total_wins = sum(p["wins_ffa"] + p["wins_team"] for p in top)
@@ -785,9 +849,9 @@ async def build_leaderboard_embed(guild, page: int, page_size: int):
         try:
             last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             next_dt = last_dt + timedelta(minutes=REFRESH_MINUTES)
-            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+            footer = f"Mis � jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
         except Exception:
-            footer = f"Mis à jour le {last_updated}"
+            footer = f"Mis � jour le {last_updated}"
         embed.set_footer(text=footer)
 
     return embed
@@ -958,7 +1022,7 @@ async def refresh_ffa_stats():
 async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
     top, last_updated = await load_ffa_leaderboard()
     if not top:
-        return None
+            return None
 
     total_pages = get_total_pages(len(top), page_size)
     page = max(1, min(page, total_pages))
@@ -967,7 +1031,7 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
     page_items = top[start:end]
     
     embed = discord.Embed(
-        title=f"🎯 Leaderboard FFA {CLAN_DISPLAY} — Page {page}/{total_pages}",
+        title=f"?? Leaderboard FFA {CLAN_DISPLAY} � Page {page}/{total_pages}",
         color=discord.Color.orange(),
     )
 
@@ -1000,9 +1064,9 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
         try:
             last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             next_dt = last_dt + timedelta(minutes=REFRESH_MINUTES)
-            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+            footer = f"Mis � jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
         except Exception:
-            footer = f"Mis à jour le {last_updated}"
+            footer = f"Mis � jour le {last_updated}"
         embed.set_footer(text=footer)
 
     return embed
@@ -1012,7 +1076,7 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
     top, last_updated = await load_1v1_leaderboard()
     if not top:
         return None
-
+    
     total_pages = get_total_pages(len(top), page_size)
     page = max(1, min(page, total_pages))
     start = (page - 1) * page_size
@@ -1020,7 +1084,7 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
     page_items = top[start:end]
 
     embed = discord.Embed(
-        title=f"🥇 Leaderboard 1v1 OpenFront — Top 100 — Page {page}/{total_pages}",
+        title=f"?? Leaderboard 1v1 OpenFront � Top 100 � Page {page}/{total_pages}",
         color=discord.Color.orange(),
     )
 
@@ -1051,7 +1115,7 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
         if is_clan_username(raw_name):
             if len(name) >= name_width:
                 name = name[: name_width - 1]
-            name = f"★{name}"
+            name = f"?{name}"
         return name
 
     def format_line(rank, player):
@@ -1078,9 +1142,9 @@ async def build_leaderboard_1v1_embed(guild, page: int, page_size: int):
             else:
                 last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             next_dt = last_dt + timedelta(minutes=ONEV1_REFRESH_MINUTES)
-            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+            footer = f"Mis � jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
         except Exception:
-            footer = f"Mis à jour le {last_updated}"
+            footer = f"Mis � jour le {last_updated}"
         embed.set_footer(text=footer)
 
     return embed
@@ -1103,7 +1167,7 @@ async def build_leaderboard_1v1_gal_embed(guild):
         return None
 
     embed = discord.Embed(
-        title=f"🥇 Leaderboard 1v1 {CLAN_DISPLAY} — Top 100",
+        title=f"?? Leaderboard 1v1 {CLAN_DISPLAY} � Top 100",
         color=discord.Color.orange(),
     )
     total_games = sum(p.get("games", 0) for p in gal_items)
@@ -1132,7 +1196,7 @@ async def build_leaderboard_1v1_gal_embed(guild):
             name = base[: name_width - 4] + "+" + suffix
         if len(name) >= name_width:
             name = name[: name_width - 1]
-        return f"★{name}"
+        return f"?{name}"
 
     def format_line(player):
         rank = player["rank"]
@@ -1159,9 +1223,9 @@ async def build_leaderboard_1v1_gal_embed(guild):
             else:
                 last_dt = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             next_dt = last_dt + timedelta(minutes=ONEV1_REFRESH_MINUTES)
-            footer = f"Mis à jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
+            footer = f"Mis � jour le {format_local_time(last_dt)} | Prochaine maj {format_local_time(next_dt)}"
         except Exception:
-            footer = f"Mis à jour le {last_updated}"
+            footer = f"Mis � jour le {last_updated}"
         embed.set_footer(text=footer)
 
     return embed
@@ -1276,15 +1340,15 @@ class LeaderboardView(discord.ui.View):
                 f"No data for {CLAN_DISPLAY}. Wait for refresh.",
                 ephemeral=True,
             )
-            return
+        return
         self.page = page
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
+    @discord.ui.button(label="?", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
     async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await self.update(interaction, max(1, self.page - 1))
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="lb_next")
+    @discord.ui.button(label="?", style=discord.ButtonStyle.secondary, custom_id="lb_next")
     async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
         top, _ = await get_top_players()
         total_pages = get_total_pages(len(top), self.page_size)
@@ -1304,15 +1368,15 @@ class LeaderboardFfaView(discord.ui.View):
                 f"No data for FFA {CLAN_DISPLAY}.",
                 ephemeral=True,
             )
-            return
+        return
         self.page = page
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="ffa_prev")
+    @discord.ui.button(label="?", style=discord.ButtonStyle.secondary, custom_id="ffa_prev")
     async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await self.update(interaction, max(1, self.page - 1))
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="ffa_next")
+    @discord.ui.button(label="?", style=discord.ButtonStyle.secondary, custom_id="ffa_next")
     async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
         top, _ = await load_ffa_leaderboard()
         total_pages = get_total_pages(len(top), self.page_size)
@@ -1336,11 +1400,11 @@ class Leaderboard1v1View(discord.ui.View):
         self.page = page
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="1v1_prev")
+    @discord.ui.button(label="?", style=discord.ButtonStyle.secondary, custom_id="1v1_prev")
     async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await self.update(interaction, max(1, self.page - 1))
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="1v1_next")
+    @discord.ui.button(label="?", style=discord.ButtonStyle.secondary, custom_id="1v1_next")
     async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
         top, _ = await load_1v1_leaderboard()
         total_pages = get_total_pages(len(top), self.page_size)
@@ -1844,23 +1908,6 @@ async def win_notify_loop():
                     await channel.send(embed=embed)
                     await mark_win_notified(game_id)
                     notified_any = True
-                if not bootstrap and not notified_any:
-                    last_empty = await get_last_empty_notify()
-                    now_dt = datetime.now(timezone.utc)
-                    send_empty = True
-                    if last_empty:
-                        try:
-                            last_dt = datetime.fromisoformat(last_empty.replace("Z", "+00:00"))
-                            delta = now_dt - last_dt
-                            if delta.total_seconds() < WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES * 60:
-                                send_empty = False
-                        except Exception:
-                            pass
-                    if send_empty:
-                        await channel.send(
-                            f"Aucune victoire {CLAN_DISPLAY} sur les {WIN_NOTIFY_RANGE_HOURS} dernières heures."
-                        )
-                        await set_last_empty_notify(now_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
         except Exception as exc:
             print(f"Win notify failed: {exc}")
         bootstrap = False
@@ -1897,10 +1944,6 @@ async def run_win_notify_once(force_empty: bool = False):
             await mark_win_notified(game_id)
             notified_any = True
 
-    if not notified_any and force_empty:
-        await channel.send(
-            f"Aucune victoire {CLAN_DISPLAY} sur les {WIN_NOTIFY_RANGE_HOURS} dernières heures."
-        )
     return {"status": "ok", "notified": notified_any}
 
 
@@ -1936,11 +1979,11 @@ async def setleaderboard(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
         return
-
+    
     record = await get_leaderboard_message(interaction.guild.id)
     if record:
         await interaction.response.send_message(
-            "Un leaderboard est déjà actif sur ce serveur. Utilise /removeleaderboard.",
+            "Un leaderboard est d�j� actif sur ce serveur. Utilise /removeleaderboard.",
             ephemeral=True,
         )
         return
@@ -1973,7 +2016,7 @@ async def register(interaction: discord.Interaction, pseudo: str, player_id: str
     except Exception as exc:
         await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
         return
-    await interaction.followup.send(f"✅ {pseudo} enregistré pour le leaderboard FFA.", ephemeral=True)
+    await interaction.followup.send(f"? {pseudo} enregistr� pour le leaderboard FFA.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboardffa", description="Show the FFA leaderboard.")
@@ -1985,7 +2028,7 @@ async def setleaderboardffa(interaction: discord.Interaction):
     record = await get_leaderboard_message_ffa(interaction.guild.id)
     if record:
         await interaction.response.send_message(
-            "Un leaderboard FFA est déjà actif. Utilise /removeleaderboardffa.",
+            "Un leaderboard FFA est d�j� actif. Utilise /removeleaderboardffa.",
             ephemeral=True,
         )
         return
@@ -1993,7 +2036,7 @@ async def setleaderboardffa(interaction: discord.Interaction):
     embed = await build_leaderboard_ffa_embed(interaction.guild, 1, 20)
     if not embed:
         await interaction.response.send_message(
-            f"Aucune donnée FFA. Enregistre-toi avec /register.",
+            f"Aucune donn�e FFA. Enregistre-toi avec /register.",
             ephemeral=True,
         )
         return
@@ -2019,7 +2062,7 @@ async def removeleaderboardffa(interaction: discord.Interaction):
     except Exception:
         pass
     await clear_leaderboard_message_ffa(interaction.guild.id)
-    await interaction.response.send_message("Leaderboard FFA supprimé.", ephemeral=True)
+    await interaction.response.send_message("Leaderboard FFA supprim�.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboard1v1", description="Show the 1v1 leaderboard.")
@@ -2031,7 +2074,7 @@ async def setleaderboard1v1(interaction: discord.Interaction):
     record = await get_leaderboard_message_1v1(interaction.guild.id)
     if record:
         await interaction.response.send_message(
-            "Un leaderboard 1v1 est déjà actif. Utilise /removeleaderboard1v1.",
+            "Un leaderboard 1v1 est d�j� actif. Utilise /removeleaderboard1v1.",
             ephemeral=True,
         )
         return
@@ -2039,7 +2082,7 @@ async def setleaderboard1v1(interaction: discord.Interaction):
     embed = await build_leaderboard_1v1_embed(interaction.guild, 1, 20)
     if not embed:
         await interaction.response.send_message(
-            "Aucune donnée 1v1 disponible pour le moment.",
+            "Aucune donn�e 1v1 disponible pour le moment.",
             ephemeral=True,
         )
         return
@@ -2065,7 +2108,7 @@ async def removeleaderboard1v1(interaction: discord.Interaction):
     except Exception:
         pass
     await clear_leaderboard_message_1v1(interaction.guild.id)
-    await interaction.response.send_message("Leaderboard 1v1 supprimé.", ephemeral=True)
+    await interaction.response.send_message("Leaderboard 1v1 supprim�.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboard1v1gal", description="Show the 1v1 leaderboard for [GAL] members.")
@@ -2077,7 +2120,7 @@ async def setleaderboard1v1gal(interaction: discord.Interaction):
     record = await get_leaderboard_message_1v1_gal(interaction.guild.id)
     if record:
         await interaction.response.send_message(
-            "Un leaderboard 1v1 [GAL] est déjà actif. Utilise /removeleaderboard1v1gal.",
+            "Un leaderboard 1v1 [GAL] est d�j� actif. Utilise /removeleaderboard1v1gal.",
             ephemeral=True,
         )
         return
@@ -2085,7 +2128,7 @@ async def setleaderboard1v1gal(interaction: discord.Interaction):
     embed = await build_leaderboard_1v1_gal_embed(interaction.guild)
     if not embed:
         await interaction.response.send_message(
-            "Aucune donnée 1v1 [GAL] disponible pour le moment.",
+            "Aucune donn�e 1v1 [GAL] disponible pour le moment.",
             ephemeral=True,
         )
         return
@@ -2111,7 +2154,7 @@ async def removeleaderboard1v1gal(interaction: discord.Interaction):
     except Exception:
         pass
     await clear_leaderboard_message_1v1_gal(interaction.guild.id)
-    await interaction.response.send_message("Leaderboard 1v1 [GAL] supprimé.", ephemeral=True)
+    await interaction.response.send_message("Leaderboard 1v1 [GAL] supprim�.", ephemeral=True)
 
 
 @bot.tree.command(name="checkwinsgal", description="Force un check des victoires [GAL].")
@@ -2126,9 +2169,9 @@ async def checkwinsgal(interaction: discord.Interaction):
         await interaction.followup.send(f"Erreur: {result.get('error')}", ephemeral=True)
         return
     if result.get("notified"):
-        await interaction.followup.send("✅ Victoires envoyées dans le salon.", ephemeral=True)
+        await interaction.followup.send("? Victoires envoy�es dans le salon.", ephemeral=True)
     else:
-        await interaction.followup.send("✅ Check terminé (aucune victoire).", ephemeral=True)
+        await interaction.followup.send("? Check termin� (aucune victoire).", ephemeral=True)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
@@ -2160,7 +2203,7 @@ async def removeleaderboard(interaction: discord.Interaction):
     except Exception:
         pass
     await clear_leaderboard_message(interaction.guild.id)
-    await interaction.response.send_message("Leaderboard supprimé.", ephemeral=True)
+    await interaction.response.send_message("Leaderboard supprim�.", ephemeral=True)
 
 
 @bot.tree.command(name="backfill_step", description="Force a 48h backfill step.")
@@ -2211,7 +2254,7 @@ async def stats_progress(interaction: discord.Interaction):
     await interaction.followup.send(msg, ephemeral=True)
 
 
-@bot.tree.command(name="reset_leaderboard", description="Réinitialise le leaderboard (Postgres).")
+@bot.tree.command(name="reset_leaderboard", description="R�initialise le leaderboard (Postgres).")
 async def reset_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     async with pool.acquire() as conn:
@@ -2232,7 +2275,7 @@ async def reset_leaderboard(interaction: discord.Interaction):
             BACKFILL_START,
         )
     await interaction.followup.send(
-        f"OK: leaderboard réinitialisé. Nouveau départ: {BACKFILL_START}",
+        f"OK: leaderboard r�initialis�. Nouveau d�part: {BACKFILL_START}",
         ephemeral=True,
     )
 
