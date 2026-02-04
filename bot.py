@@ -151,6 +151,13 @@ def is_clan_username(username: str) -> bool:
     return f"[{tag}]" in upper or upper.startswith(f"{tag} ")
 
 
+def is_clan_player(player: dict) -> bool:
+    tag = player.get("clanTag")
+    if tag and str(tag).upper() == CLAN_TAG.upper():
+        return True
+    return is_clan_username(player.get("username") or "")
+
+
 def game_mode(info):
     return (info.get("config", {}) or {}).get("gameMode") or ""
 
@@ -191,8 +198,8 @@ def extract_gal_players(info):
     names = []
     for p in info.get("players", []):
         username = p.get("username") or ""
-        if is_clan_username(username):
-            names.append(username)
+        if is_clan_player(p):
+            names.append(username or CLAN_DISPLAY)
     return sorted(set(names))
 
 
@@ -203,7 +210,7 @@ def clan_won_game(info) -> bool:
     gal_clients = {
         p.get("clientID")
         for p in info.get("players", [])
-        if is_clan_username(p.get("username") or "")
+        if is_clan_player(p)
     }
     return bool(winners & gal_clients)
 
