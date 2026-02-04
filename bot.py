@@ -1925,26 +1925,40 @@ async def run_win_notify_once(force_empty: bool = False):
 
     headers = {"User-Agent": USER_AGENT}
     notified_any = False
+    stats = {
+        "sessions": 0,
+        "wins": 0,
+        "sent": 0,
+        "skipped_notified": 0,
+        "missing_game_id": 0,
+        "fetch_errors": 0,
+    }
     async with aiohttp.ClientSession(headers=headers) as session:
         sessions = await fetch_clan_sessions(session, start_iso, end_iso)
+        stats["sessions"] = len(sessions)
         for s in sessions:
             if not s.get("hasWon"):
                 continue
+            stats["wins"] += 1
             game_id = s.get("gameId")
             if not game_id:
+                stats["missing_game_id"] += 1
                 continue
             if await is_win_notified(game_id):
+                stats["skipped_notified"] += 1
                 continue
             try:
                 info = await fetch_game_info(session, game_id)
             except Exception:
+                stats["fetch_errors"] += 1
                 continue
             embed = build_win_embed(info)
             await channel.send(embed=embed)
             await mark_win_notified(game_id)
             notified_any = True
+            stats["sent"] += 1
 
-    return {"status": "ok", "notified": notified_any}
+    return {"status": "ok", "notified": notified_any, **stats}
 
 
 @bot.event
@@ -2168,10 +2182,25 @@ async def checkwinsgal(interaction: discord.Interaction):
     if result.get("status") != "ok":
         await interaction.followup.send(f"Erreur: {result.get('error')}", ephemeral=True)
         return
-    if result.get("notified"):
-        await interaction.followup.send("? Victoires envoy�es dans le salon.", ephemeral=True)
+    wins = result.get("wins", 0)
+    sent = result.get("sent", 0)
+    skipped = result.get("skipped_notified", 0)
+    missing = result.get("missing_game_id", 0)
+    errors = result.get("fetch_errors", 0)
+    if sent > 0:
+        message = (
+            f"✅ Victoires envoyées: {sent}.\n"
+            f"Total victoires dans la fenêtre: {wins}.\n"
+            f"Déjà notifiées: {skipped}."
+        )
     else:
-        await interaction.followup.send("? Check termin� (aucune victoire).", ephemeral=True)
+        message = (
+            "❌ Aucune nouvelle victoire à envoyer.\n"
+            f"Total victoires dans la fenêtre: {wins}.\n"
+            f"Déjà notifiées: {skipped}.\n"
+            f"Sans gameId: {missing} | Erreurs fetch: {errors}."
+        )
+    await interaction.followup.send(message, ephemeral=True)
 
 
 @bot.tree.command(name="refresh_leaderboard", description="Force a live refresh.")
