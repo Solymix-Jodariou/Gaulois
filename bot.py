@@ -186,6 +186,31 @@ def build_api_headers():
     return headers
 
 
+def get_notify_channel_error(channel) -> Optional[str]:
+    if channel is None:
+        return "Salon introuvable."
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return "WIN_NOTIFY_CHANNEL_ID ne pointe pas vers un salon texte."
+    guild = channel.guild
+    if not guild:
+        return "Salon sans guild associée."
+    perms = channel.permissions_for(guild.me)
+    required = []
+    if not perms.view_channel:
+        required.append("Voir le salon")
+    if isinstance(channel, discord.Thread):
+        if not perms.send_messages_in_threads:
+            required.append("Envoyer des messages dans les fils")
+    else:
+        if not perms.send_messages:
+            required.append("Envoyer des messages")
+    if not perms.embed_links:
+        required.append("Intégrer des liens")
+    if required:
+        return "Permissions manquantes: " + ", ".join(required)
+    return None
+
+
 def is_clan_username(username: str) -> bool:
     if not username:
         return False
@@ -2170,7 +2195,12 @@ async def win_notify_loop():
         }
         error_text = None
         try:
-            channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(int(WIN_NOTIFY_CHANNEL_ID))
+            channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(
+                int(WIN_NOTIFY_CHANNEL_ID)
+            )
+            channel_error = get_notify_channel_error(channel)
+            if channel_error:
+                raise RuntimeError(channel_error)
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(hours=WIN_NOTIFY_RANGE_HOURS)
             start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2259,6 +2289,9 @@ async def run_win_notify_once(force_empty: bool = False):
     if not WIN_NOTIFY_CHANNEL_ID:
         return {"status": "error", "error": "WIN_NOTIFY_CHANNEL_ID missing"}
     channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(int(WIN_NOTIFY_CHANNEL_ID))
+    channel_error = get_notify_channel_error(channel)
+    if channel_error:
+        return {"status": "error", "error": channel_error}
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(hours=WIN_NOTIFY_RANGE_HOURS)
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
