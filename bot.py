@@ -654,6 +654,14 @@ async def init_db():
             )
             """
         )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ofm_team_name (
+                guild_id BIGINT PRIMARY KEY,
+                name TEXT NOT NULL
+            )
+            """
+        )
         columns = await conn.fetch(
             "SELECT column_name FROM information_schema.columns WHERE table_name='win_notify_state'"
         )
@@ -1617,11 +1625,12 @@ async def update_ofm_board(guild: discord.Guild):
     await set_ofm_board_message(guild.id, channel.id, message.id)
 
 
-def build_ofm_admin_panel_embed():
+async def build_ofm_admin_panel_embed(guild: discord.Guild):
+    team_name = await get_ofm_team_name(guild.id) or "Equipe OFM"
     embed = discord.Embed(
         title="✨ Panel OFM Manager",
         description=(
-            "**Centre de commande OFM**\n"
+            f"**Equipe : {team_name}**\n"
             "Gérez l'équipe, les rôles et les statuts en un clic."
         ),
         color=discord.Color.from_rgb(88, 101, 242),
@@ -1655,7 +1664,7 @@ async def update_ofm_admin_panel(guild: discord.Guild):
     if not isinstance(channel, discord.TextChannel):
         return
     record = await get_ofm_admin_panel_message(guild.id)
-    embed = build_ofm_admin_panel_embed()
+    embed = await build_ofm_admin_panel_embed(guild)
     if record:
         try:
             message = await channel.fetch_message(record["message_id"])
@@ -1832,6 +1841,15 @@ async def get_ofm_participants(guild_id: int, status: Optional[str] = None):
         )
 
 
+async def get_ofm_participant(guild_id: int, user_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT user_id, status, team_role_id FROM ofm_participants WHERE guild_id = $1 AND user_id = $2",
+            guild_id,
+            user_id,
+        )
+
+
 async def get_ofm_admin_panel_message(guild_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -1861,6 +1879,29 @@ async def clear_ofm_admin_panel_message(guild_id: int):
         await conn.execute(
             "DELETE FROM ofm_admin_panel_message WHERE guild_id = $1",
             guild_id,
+        )
+
+
+async def get_ofm_team_name(guild_id: int) -> Optional[str]:
+    async with pool.acquire() as conn:
+        record = await conn.fetchrow(
+            "SELECT name FROM ofm_team_name WHERE guild_id = $1",
+            guild_id,
+        )
+        return record["name"] if record else None
+
+
+async def set_ofm_team_name(guild_id: int, name: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ofm_team_name (guild_id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                name = EXCLUDED.name
+            """,
+            guild_id,
+            name,
         )
 
 
@@ -2168,6 +2209,13 @@ class OFMReviewView(discord.ui.View):
         member = await self._get_candidate_member(interaction)
         if not member:
             return
+        existing = await get_ofm_participant(interaction.guild.id, member.id)
+        if existing and existing["status"] in ("accepted", "refused"):
+            await interaction.response.send_message(
+                "Cette candidature a déjà été traitée.",
+                ephemeral=True,
+            )
+            return
         role = interaction.guild.get_role(OFM_ROLE_ID)
         if role and role not in member.roles:
             await member.add_roles(role, reason="Candidature OFM acceptée")
@@ -2189,6 +2237,8 @@ class OFMReviewView(discord.ui.View):
             color=discord.Color.green(),
         )
         await interaction.response.send_message(embed=embed)
+        if interaction.channel:
+            await interaction.channel.delete(reason="Candidature OFM acceptée")
 
     @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger, custom_id="ofm_review_refuse")
     async def refuse(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -2196,6 +2246,13 @@ class OFMReviewView(discord.ui.View):
             return
         member = await self._get_candidate_member(interaction)
         if not member:
+            return
+        existing = await get_ofm_participant(interaction.guild.id, member.id)
+        if existing and existing["status"] in ("accepted", "refused"):
+            await interaction.response.send_message(
+                "Cette candidature a déjà été traitée.",
+                ephemeral=True,
+            )
             return
         role = interaction.guild.get_role(OFM_ROLE_ID)
         if role and role in member.roles:
@@ -2218,6 +2275,8 @@ class OFMReviewView(discord.ui.View):
             color=discord.Color.red(),
         )
         await interaction.response.send_message(embed=embed)
+        if interaction.channel:
+            await interaction.channel.delete(reason="Candidature OFM refusée")
 
     @discord.ui.button(label="En attente", style=discord.ButtonStyle.secondary, custom_id="ofm_review_pending")
     async def pending(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -2369,14 +2428,12 @@ class OFMTeamNameModal(discord.ui.Modal):
         if not manager_role or manager_role not in interaction.user.roles:
             await interaction.response.send_message("Accès réservé aux OFM managers.", ephemeral=True)
             return
-        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
-        if not team_role:
-            await interaction.response.send_message("Rôle d'équipe introuvable.", ephemeral=True)
+        new_name = str(self.team_name.value).strip()
+        if not new_name:
+            await interaction.response.send_message("Nom invalide.", ephemeral=True)
             return
-        if not interaction.guild.me or not interaction.guild.me.guild_permissions.manage_roles:
-            await interaction.response.send_message("Je n'ai pas la permission de gérer les rôles.", ephemeral=True)
-            return
-        await team_role.edit(name=str(self.team_name.value).strip(), reason="OFM: changement nom équipe")
+        await set_ofm_team_name(interaction.guild.id, new_name)
+        await update_ofm_admin_panel(interaction.guild)
         await interaction.response.send_message("✅ Nom d'équipe mis à jour.", ephemeral=True)
 
 
