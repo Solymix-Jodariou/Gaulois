@@ -64,6 +64,21 @@ OFM_SUB_ROLE_ID = int(os.getenv("OFM_SUB_ROLE_ID", "0"))
 OFM_CATEGORY_ID = int(os.getenv("OFM_CATEGORY_ID", "1469703934514827531"))
 OFM_BOARD_CHANNEL_ID = int(os.getenv("OFM_BOARD_CHANNEL_ID", "1469696688804466972"))
 OFM_ADMIN_CHANNEL_ID = int(os.getenv("OFM_ADMIN_CHANNEL_ID", "1469711880565162201"))
+ADMIN_PANEL_CHANNEL_ID = int(os.getenv("ADMIN_PANEL_CHANNEL_ID", "1469724972246237436"))
+MOD_LOG_CHANNEL_ID = int(os.getenv("MOD_LOG_CHANNEL_ID", "1351168832261193791"))
+FOUNDER_USER_ID = int(os.getenv("FOUNDER_USER_ID", "1350921590359195699"))
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "1351313848275042385"))
+MOD_COMMANDS = [
+    "warn",
+    "warnlist",
+    "clearwarn",
+    "mute",
+    "kick",
+    "ban",
+    "unban",
+    "case",
+    "note",
+]
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -152,6 +167,44 @@ def parse_openfront_time(value) -> Optional[datetime]:
         except Exception:
             return None
     return None
+
+
+def parse_duration_seconds(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    raw = value.strip().lower()
+    if raw.isdigit():
+        return int(raw)
+    match = re.fullmatch(r"(\d+)([smhd])", raw)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == "s":
+        return amount
+    if unit == "m":
+        return amount * 60
+    if unit == "h":
+        return amount * 3600
+    if unit == "d":
+        return amount * 86400
+    return None
+
+
+def format_duration(seconds: Optional[int]) -> str:
+    if not seconds:
+        return "Permanent"
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def is_admin_user(user_id: int) -> bool:
+    return user_id in {FOUNDER_USER_ID, ADMIN_USER_ID}
 
 
 def is_pseudo_valid(pseudo: str) -> bool:
@@ -659,6 +712,74 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS ofm_team_name (
                 guild_id BIGINT PRIMARY KEY,
                 name TEXT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mod_admin_panel_message (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mod_warnings (
+                id BIGSERIAL PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                moderator_id BIGINT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mod_actions (
+                id BIGSERIAL PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                moderator_id BIGINT NOT NULL,
+                action_type TEXT NOT NULL,
+                reason TEXT,
+                duration_seconds INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mod_permissions (
+                guild_id BIGINT NOT NULL,
+                role_id BIGINT NOT NULL,
+                command TEXT NOT NULL,
+                allowed BOOLEAN NOT NULL DEFAULT TRUE,
+                PRIMARY KEY (guild_id, role_id, command)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mod_config (
+                guild_id BIGINT PRIMARY KEY,
+                log_channel_id BIGINT,
+                default_mute_seconds INTEGER DEFAULT 3600,
+                default_ban_seconds INTEGER DEFAULT 0
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mod_notes (
+                id BIGSERIAL PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                moderator_id BIGINT NOT NULL,
+                note TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -1679,6 +1800,112 @@ async def update_ofm_admin_panel(guild: discord.Guild):
     await set_ofm_admin_panel_message(guild.id, channel.id, message.id)
 
 
+def build_mod_admin_panel_embed(
+    guild: discord.Guild,
+    selected_role: Optional[discord.Role] = None,
+    allowed_commands: Optional[list] = None,
+):
+    role_text = selected_role.mention if selected_role else "Aucun rôle sélectionné"
+    allowed_text = ", ".join(allowed_commands) if allowed_commands else "Aucune autorisation"
+    embed = discord.Embed(
+        title="🛡️ Panel Administration",
+        description=(
+            "Configure les permissions et exécute les actions de modération.\n"
+            f"Rôle sélectionné : {role_text}\n"
+            f"Autorisations : {allowed_text}"
+        ),
+        color=discord.Color.red(),
+    )
+    embed.add_field(
+        name="Gestion des sanctions",
+        value=(
+            "warn / warnlist / clearwarn\n"
+            "mute / kick / ban / unban\n"
+            "case"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Casier & Logs",
+        value="Historique complet et logs centralisés.",
+        inline=False,
+    )
+    embed.set_footer(text="Accès réservé fondateur/admin")
+    return embed
+
+
+async def update_mod_admin_panel(guild: discord.Guild, selected_role_id: Optional[int] = None):
+    channel = guild.get_channel(ADMIN_PANEL_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return
+    record = await get_mod_admin_panel_message(guild.id)
+    selected_role = guild.get_role(selected_role_id) if selected_role_id else None
+    allowed_commands = None
+    if selected_role:
+        perms = await get_permissions_for_role(guild.id, selected_role.id)
+        allowed_commands = [p["command"] for p in perms if p["allowed"]]
+    embed = build_mod_admin_panel_embed(guild, selected_role, allowed_commands)
+    view = ModAdminPanelView(guild_id=guild.id, selected_role_id=selected_role_id)
+    if record:
+        try:
+            message = await channel.fetch_message(record["message_id"])
+            await message.edit(embed=embed, view=view)
+            return
+        except Exception:
+            await clear_mod_admin_panel_message(guild.id)
+    message = await channel.send(embed=embed, view=view)
+    await set_mod_admin_panel_message(guild.id, channel.id, message.id)
+
+
+async def send_mod_log(guild: discord.Guild, embed: discord.Embed):
+    config = await get_mod_config(guild.id)
+    channel_id = config["log_channel_id"] if config and config["log_channel_id"] else MOD_LOG_CHANNEL_ID
+    channel = guild.get_channel(channel_id)
+    if isinstance(channel, discord.TextChannel):
+        await channel.send(embed=embed)
+
+
+def build_mod_log_embed(
+    action: str,
+    target: discord.abc.User,
+    moderator: discord.abc.User,
+    reason: Optional[str] = None,
+    duration_seconds: Optional[int] = None,
+):
+    embed = discord.Embed(
+        title="🧾 Log de modération",
+        color=discord.Color.dark_red(),
+    )
+    embed.add_field(name="Action", value=action, inline=True)
+    embed.add_field(name="Membre", value=f"{target.mention} (`{target.id}`)", inline=False)
+    embed.add_field(name="Staff", value=f"{moderator.mention} (`{moderator.id}`)", inline=False)
+    if reason:
+        embed.add_field(name="Raison", value=reason, inline=False)
+    if duration_seconds is not None:
+        embed.add_field(name="Durée", value=format_duration(duration_seconds), inline=True)
+    embed.timestamp = datetime.now(timezone.utc)
+    return embed
+
+
+async def ensure_mod_permission(interaction: discord.Interaction, command: str) -> bool:
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return False
+    member = interaction.user
+    if not await has_mod_permission(interaction.guild, member, command):
+        await interaction.response.send_message("Accès refusé.", ephemeral=True)
+        return False
+    return True
+
+
+async def schedule_unban(guild: discord.Guild, user_id: int, delay_seconds: int):
+    await asyncio.sleep(delay_seconds)
+    try:
+        await guild.unban(discord.Object(id=user_id), reason="Fin de ban temporaire")
+    except Exception:
+        return
+
+
 async def get_leaderboard_message_ffa(guild_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -1906,6 +2133,251 @@ async def set_ofm_team_name(guild_id: int, name: str):
             guild_id,
             name,
         )
+
+
+async def get_mod_admin_panel_message(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM mod_admin_panel_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_mod_admin_panel_message(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO mod_admin_panel_message (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_mod_admin_panel_message(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM mod_admin_panel_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def add_warning(guild_id: int, user_id: int, moderator_id: int, reason: str):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            INSERT INTO mod_warnings (guild_id, user_id, moderator_id, reason)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, created_at
+            """,
+            guild_id,
+            user_id,
+            moderator_id,
+            reason,
+        )
+
+
+async def list_warnings(guild_id: int, user_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT id, moderator_id, reason, created_at
+            FROM mod_warnings
+            WHERE guild_id = $1 AND user_id = $2
+            ORDER BY id DESC
+            """,
+            guild_id,
+            user_id,
+        )
+
+
+async def delete_warning(guild_id: int, user_id: int, warn_id: int):
+    async with pool.acquire() as conn:
+        return await conn.execute(
+            "DELETE FROM mod_warnings WHERE guild_id = $1 AND user_id = $2 AND id = $3",
+            guild_id,
+            user_id,
+            warn_id,
+        )
+
+
+async def clear_all_warnings(guild_id: int, user_id: int):
+    async with pool.acquire() as conn:
+        return await conn.execute(
+            "DELETE FROM mod_warnings WHERE guild_id = $1 AND user_id = $2",
+            guild_id,
+            user_id,
+        )
+
+
+async def add_mod_action(
+    guild_id: int,
+    user_id: int,
+    moderator_id: int,
+    action_type: str,
+    reason: Optional[str] = None,
+    duration_seconds: Optional[int] = None,
+):
+    async with pool.acquire() as conn:
+        return await conn.execute(
+            """
+            INSERT INTO mod_actions (guild_id, user_id, moderator_id, action_type, reason, duration_seconds)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            guild_id,
+            user_id,
+            moderator_id,
+            action_type,
+            reason,
+            duration_seconds,
+        )
+
+
+async def list_mod_actions(guild_id: int, user_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT action_type, reason, duration_seconds, created_at, moderator_id
+            FROM mod_actions
+            WHERE guild_id = $1 AND user_id = $2
+            ORDER BY id DESC
+            """,
+            guild_id,
+            user_id,
+        )
+
+
+async def set_mod_permission(guild_id: int, role_id: int, command: str, allowed: bool):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO mod_permissions (guild_id, role_id, command, allowed)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (guild_id, role_id, command) DO UPDATE SET
+                allowed = EXCLUDED.allowed
+            """,
+            guild_id,
+            role_id,
+            command,
+            allowed,
+        )
+
+
+async def get_permissions_for_role(guild_id: int, role_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT command, allowed
+            FROM mod_permissions
+            WHERE guild_id = $1 AND role_id = $2
+            """,
+            guild_id,
+            role_id,
+        )
+
+
+async def get_allowed_roles_for_command(guild_id: int, command: str):
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT role_id
+            FROM mod_permissions
+            WHERE guild_id = $1 AND command = $2 AND allowed = TRUE
+            """,
+            guild_id,
+            command,
+        )
+
+
+async def get_mod_config(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            SELECT log_channel_id, default_mute_seconds, default_ban_seconds
+            FROM mod_config
+            WHERE guild_id = $1
+            """,
+            guild_id,
+        )
+
+
+async def set_mod_config(
+    guild_id: int,
+    log_channel_id: Optional[int] = None,
+    default_mute_seconds: Optional[int] = None,
+    default_ban_seconds: Optional[int] = None,
+):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO mod_config (guild_id, log_channel_id, default_mute_seconds, default_ban_seconds)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                log_channel_id = COALESCE(EXCLUDED.log_channel_id, mod_config.log_channel_id),
+                default_mute_seconds = COALESCE(EXCLUDED.default_mute_seconds, mod_config.default_mute_seconds),
+                default_ban_seconds = COALESCE(EXCLUDED.default_ban_seconds, mod_config.default_ban_seconds)
+            """,
+            guild_id,
+            log_channel_id,
+            default_mute_seconds,
+            default_ban_seconds,
+        )
+
+
+async def add_mod_note(guild_id: int, user_id: int, moderator_id: int, note: str):
+    async with pool.acquire() as conn:
+        return await conn.execute(
+            """
+            INSERT INTO mod_notes (guild_id, user_id, moderator_id, note)
+            VALUES ($1, $2, $3, $4)
+            """,
+            guild_id,
+            user_id,
+            moderator_id,
+            note,
+        )
+
+
+async def list_mod_notes(guild_id: int, user_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT note, moderator_id, created_at
+            FROM mod_notes
+            WHERE guild_id = $1 AND user_id = $2
+            ORDER BY id DESC
+            """,
+            guild_id,
+            user_id,
+        )
+
+
+async def has_mod_permission(guild: discord.Guild, member: discord.Member, command: str) -> bool:
+    if is_admin_user(member.id):
+        return True
+    allowed_roles = await get_allowed_roles_for_command(guild.id, command)
+    if not allowed_roles:
+        return False
+    allowed_set = {r["role_id"] for r in allowed_roles}
+    return any(role.id in allowed_set for role in member.roles)
+
+
+def can_moderate_member(actor: discord.Member, target: discord.Member, bot_member: discord.Member) -> Optional[str]:
+    if actor.id == target.id:
+        return "Action impossible sur soi-même."
+    if target == bot_member:
+        return "Action impossible sur le bot."
+    if target.id == actor.guild.owner_id or target.top_role >= actor.top_role:
+        if not is_admin_user(actor.id) and actor.id != actor.guild.owner_id:
+            return "Impossible de sanctionner un supérieur."
+    if target.top_role >= bot_member.top_role:
+        return "Le bot ne peut pas sanctionner ce membre (hiérarchie)."
+    return None
 
 
 class LeaderboardView(discord.ui.View):
@@ -2635,6 +3107,195 @@ class OFMConfigView(discord.ui.View):
         await interaction.response.send_modal(OFMReplacementModal())
 
 
+class ModDefaultsModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Configurer les durées par défaut")
+        self.default_mute = discord.ui.TextInput(
+            label="Mute par défaut (ex: 1h, 30m)",
+            required=False,
+            max_length=16,
+        )
+        self.default_ban = discord.ui.TextInput(
+            label="Ban par défaut (ex: 7d, vide=permanent)",
+            required=False,
+            max_length=16,
+        )
+        self.add_item(self.default_mute)
+        self.add_item(self.default_ban)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        if not is_admin_user(interaction.user.id):
+            await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+            return
+        mute_value = str(self.default_mute.value).strip()
+        ban_value = str(self.default_ban.value).strip()
+        mute_seconds = parse_duration_seconds(mute_value) if mute_value else None
+        ban_seconds = parse_duration_seconds(ban_value) if ban_value else None
+        if mute_value and mute_seconds is None:
+            await interaction.response.send_message("Durée mute invalide.", ephemeral=True)
+            return
+        if ban_value and ban_seconds is None:
+            await interaction.response.send_message("Durée ban invalide.", ephemeral=True)
+            return
+        await set_mod_config(interaction.guild.id, default_mute_seconds=mute_seconds, default_ban_seconds=ban_seconds)
+        await update_mod_admin_panel(interaction.guild)
+        await interaction.response.send_message("✅ Durées mises à jour.", ephemeral=True)
+
+
+class ModConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int, on_confirm):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.on_confirm_callback = on_confirm
+
+    async def _ensure_requester(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message("Action réservée au demandeur.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger, custom_id="mod_confirm")
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_requester(interaction):
+            return
+        await self.on_confirm_callback(interaction)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, custom_id="mod_cancel")
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_requester(interaction):
+            return
+        await interaction.response.send_message("Action annulée.", ephemeral=True)
+class ModAdminPanelView(discord.ui.View):
+    def __init__(self, guild_id: Optional[int] = None, selected_role_id: Optional[int] = None, selected_command: Optional[str] = None):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.selected_role_id = selected_role_id
+        self.selected_command = selected_command
+
+        role_options = []
+        guild = bot.get_guild(guild_id) if guild_id else None
+        if guild:
+            roles = [r for r in guild.roles if r != guild.default_role]
+            roles.sort(key=lambda r: r.position, reverse=True)
+            for role in roles[:25]:
+                role_options.append(
+                    discord.SelectOption(
+                        label=role.name[:100],
+                        value=str(role.id),
+                        default=(role.id == selected_role_id),
+                    )
+                )
+        if role_options:
+            role_select = discord.ui.Select(
+                placeholder="Sélectionner un rôle...",
+                options=role_options,
+                custom_id="mod_role_select",
+            )
+            role_select.callback = self._on_role_select
+            self.add_item(role_select)
+
+        command_options = [
+            discord.SelectOption(
+                label=cmd,
+                value=cmd,
+                default=(cmd == selected_command),
+            )
+            for cmd in MOD_COMMANDS
+        ]
+        command_select = discord.ui.Select(
+            placeholder="Sélectionner une commande...",
+            options=command_options,
+            custom_id="mod_command_select",
+        )
+        command_select.callback = self._on_command_select
+        self.add_item(command_select)
+
+        self._add_button("Autoriser", "✅", discord.ButtonStyle.success, "mod_allow", self._allow, 2)
+        self._add_button("Retirer", "⛔", discord.ButtonStyle.danger, "mod_deny", self._deny, 2)
+        self._add_button("Voir permissions", "📋", discord.ButtonStyle.secondary, "mod_view", self._view, 3)
+        self._add_button("Configurer durées", "⏱️", discord.ButtonStyle.primary, "mod_defaults", self._defaults, 3)
+
+    def _add_button(self, label, emoji, style, custom_id, callback, row):
+        button = discord.ui.Button(
+            label=label,
+            emoji=emoji,
+            style=style,
+            custom_id=custom_id,
+            row=row,
+        )
+        button.callback = callback
+        self.add_item(button)
+
+    async def _ensure_admin(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return False
+        if not is_admin_user(interaction.user.id):
+            await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_role_select(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        selected = int(interaction.data["values"][0])
+        await update_mod_admin_panel(interaction.guild, selected_role_id=selected)
+        await interaction.response.defer()
+
+    async def _on_command_select(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        selected = interaction.data["values"][0]
+        view = ModAdminPanelView(
+            guild_id=interaction.guild.id,
+            selected_role_id=self.selected_role_id,
+            selected_command=selected,
+        )
+        await interaction.response.edit_message(view=view)
+
+    async def _allow(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        if not self.selected_role_id or not self.selected_command:
+            await interaction.response.send_message("Sélectionne un rôle et une commande.", ephemeral=True)
+            return
+        await set_mod_permission(interaction.guild.id, self.selected_role_id, self.selected_command, True)
+        await update_mod_admin_panel(interaction.guild, selected_role_id=self.selected_role_id)
+        await interaction.response.send_message("✅ Permission accordée.", ephemeral=True)
+
+    async def _deny(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        if not self.selected_role_id or not self.selected_command:
+            await interaction.response.send_message("Sélectionne un rôle et une commande.", ephemeral=True)
+            return
+        await set_mod_permission(interaction.guild.id, self.selected_role_id, self.selected_command, False)
+        await update_mod_admin_panel(interaction.guild, selected_role_id=self.selected_role_id)
+        await interaction.response.send_message("✅ Permission retirée.", ephemeral=True)
+
+    async def _view(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        if not self.selected_role_id:
+            await interaction.response.send_message("Sélectionne un rôle.", ephemeral=True)
+            return
+        perms = await get_permissions_for_role(interaction.guild.id, self.selected_role_id)
+        allowed = [p["command"] for p in perms if p["allowed"]]
+        allowed_text = ", ".join(allowed) if allowed else "Aucune"
+        await interaction.response.send_message(
+            f"Permissions: {allowed_text}",
+            ephemeral=True,
+        )
+
+    async def _defaults(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        await interaction.response.send_modal(ModDefaultsModal())
+
+
 async def update_leaderboard_message():
     if not bot.guilds:
         return
@@ -3320,9 +3981,11 @@ async def on_ready():
     bot.add_view(OFMInscriptionView())
     bot.add_view(OFMReviewView())
     bot.add_view(OFMConfigView())
+    bot.add_view(ModAdminPanelView())
     for guild in bot.guilds:
         bot.loop.create_task(update_ofm_board(guild))
         bot.loop.create_task(update_ofm_admin_panel(guild))
+        bot.loop.create_task(update_mod_admin_panel(guild))
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
     bot.loop.create_task(backfill_1v1_loop())
@@ -3386,6 +4049,260 @@ async def setofmpanel(interaction: discord.Interaction):
         return
     await update_ofm_admin_panel(interaction.guild)
     await interaction.response.send_message("✅ Panel OFM mis à jour.", ephemeral=True)
+
+
+@bot.tree.command(name="setadminpanel", description="Créer/mettre à jour le panel admin.")
+async def setadminpanel(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_user(interaction.user.id):
+        await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+    await set_mod_config(interaction.guild.id, log_channel_id=MOD_LOG_CHANNEL_ID)
+    await update_mod_admin_panel(interaction.guild)
+    await interaction.response.send_message("✅ Panel admin mis à jour.", ephemeral=True)
+
+
+@bot.tree.command(name="warn", description="Avertir un membre.")
+@app_commands.describe(member="Membre à avertir", reason="Raison obligatoire")
+async def warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+    if not await ensure_mod_permission(interaction, "warn"):
+        return
+    bot_member = interaction.guild.me
+    err = can_moderate_member(interaction.user, member, bot_member)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+    record = await add_warning(interaction.guild.id, member.id, interaction.user.id, reason)
+    await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "warn", reason)
+    await send_mod_log(
+        interaction.guild,
+        build_mod_log_embed("warn", member, interaction.user, reason),
+    )
+    await interaction.response.send_message(
+        f"✅ Warn ajouté (ID {record['id']}).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="warnlist", description="Liste des warns d'un membre.")
+@app_commands.describe(member="Membre")
+async def warnlist(interaction: discord.Interaction, member: discord.Member):
+    if not await ensure_mod_permission(interaction, "warnlist"):
+        return
+    rows = await list_warnings(interaction.guild.id, member.id)
+    if not rows:
+        await interaction.response.send_message("Aucun warn.", ephemeral=True)
+        return
+    lines = []
+    for row in rows[:15]:
+        mod_id = row["moderator_id"]
+        reason = row["reason"]
+        created_at = row["created_at"]
+        lines.append(f"#{row['id']} • <@{mod_id}> • {created_at}\n{reason}")
+    embed = discord.Embed(
+        title=f"Warns de {member.display_name}",
+        description="\n\n".join(lines),
+        color=discord.Color.orange(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="clearwarn", description="Supprime un warn d'un membre.")
+@app_commands.describe(member="Membre", warn_id="ID du warn (vide = tout supprimer)")
+async def clearwarn(interaction: discord.Interaction, member: discord.Member, warn_id: Optional[int] = None):
+    if not await ensure_mod_permission(interaction, "clearwarn"):
+        return
+    if warn_id:
+        await delete_warning(interaction.guild.id, member.id, warn_id)
+        await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "clearwarn", f"warn_id={warn_id}")
+        await send_mod_log(
+            interaction.guild,
+            build_mod_log_embed("clearwarn", member, interaction.user, f"warn_id={warn_id}"),
+        )
+        await interaction.response.send_message("✅ Warn supprimé.", ephemeral=True)
+        return
+
+    async def do_clear(interaction_confirm: discord.Interaction):
+        await clear_all_warnings(interaction_confirm.guild.id, member.id)
+        await add_mod_action(interaction_confirm.guild.id, member.id, interaction_confirm.user.id, "clearwarn", "all")
+        await send_mod_log(
+            interaction_confirm.guild,
+            build_mod_log_embed("clearwarn", member, interaction_confirm.user, "all"),
+        )
+        await interaction_confirm.response.send_message("✅ Tous les warns ont été supprimés.", ephemeral=True)
+
+    await interaction.response.send_message(
+        "Confirmer la suppression de tous les warns ?",
+        view=ModConfirmView(interaction.user.id, do_clear),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="mute", description="Mute/timeout un membre.")
+@app_commands.describe(member="Membre", duration="Durée (ex: 10m, 2h)", reason="Raison")
+async def mute(interaction: discord.Interaction, member: discord.Member, duration: Optional[str] = None, reason: Optional[str] = None):
+    if not await ensure_mod_permission(interaction, "mute"):
+        return
+    bot_member = interaction.guild.me
+    err = can_moderate_member(interaction.user, member, bot_member)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+    seconds = parse_duration_seconds(duration) if duration else None
+    if seconds is None:
+        config = await get_mod_config(interaction.guild.id)
+        seconds = config["default_mute_seconds"] if config else 3600
+    until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    await member.timeout(until, reason=reason or "Mute")
+    await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "mute", reason, seconds)
+    await send_mod_log(
+        interaction.guild,
+        build_mod_log_embed("mute", member, interaction.user, reason, seconds),
+    )
+    await interaction.response.send_message("✅ Mute appliqué.", ephemeral=True)
+
+
+@bot.tree.command(name="kick", description="Kick un membre.")
+@app_commands.describe(member="Membre", reason="Raison")
+async def kick(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
+    if not await ensure_mod_permission(interaction, "kick"):
+        return
+    bot_member = interaction.guild.me
+    err = can_moderate_member(interaction.user, member, bot_member)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    async def do_kick(confirm_interaction: discord.Interaction):
+        await member.kick(reason=reason or "Kick")
+        await add_mod_action(confirm_interaction.guild.id, member.id, confirm_interaction.user.id, "kick", reason)
+        await send_mod_log(
+            confirm_interaction.guild,
+            build_mod_log_embed("kick", member, confirm_interaction.user, reason),
+        )
+        await confirm_interaction.response.send_message("✅ Membre kick.", ephemeral=True)
+
+    await interaction.response.send_message(
+        "Confirmer le kick ?",
+        view=ModConfirmView(interaction.user.id, do_kick),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="ban", description="Ban un membre.")
+@app_commands.describe(member="Membre", duration="Durée (ex: 7d) ou vide = permanent", reason="Raison")
+async def ban(interaction: discord.Interaction, member: discord.Member, duration: Optional[str] = None, reason: Optional[str] = None):
+    if not await ensure_mod_permission(interaction, "ban"):
+        return
+    bot_member = interaction.guild.me
+    err = can_moderate_member(interaction.user, member, bot_member)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+    seconds = parse_duration_seconds(duration) if duration else None
+    if seconds is None and duration:
+        await interaction.response.send_message("Durée invalide.", ephemeral=True)
+        return
+    if seconds is None:
+        config = await get_mod_config(interaction.guild.id)
+        seconds = config["default_ban_seconds"] if config else 0
+
+    async def do_ban(confirm_interaction: discord.Interaction):
+        await confirm_interaction.guild.ban(member, reason=reason or "Ban", delete_message_days=0)
+        await add_mod_action(confirm_interaction.guild.id, member.id, confirm_interaction.user.id, "ban", reason, seconds or None)
+        await send_mod_log(
+            confirm_interaction.guild,
+            build_mod_log_embed("ban", member, confirm_interaction.user, reason, seconds or None),
+        )
+        if seconds:
+            bot.loop.create_task(schedule_unban(confirm_interaction.guild, member.id, seconds))
+        await confirm_interaction.response.send_message("✅ Membre banni.", ephemeral=True)
+
+    await interaction.response.send_message(
+        "Confirmer le ban ?",
+        view=ModConfirmView(interaction.user.id, do_ban),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="unban", description="Unban un membre.")
+@app_commands.describe(user_id="ID Discord du membre", reason="Raison")
+async def unban(interaction: discord.Interaction, user_id: str, reason: Optional[str] = None):
+    if not await ensure_mod_permission(interaction, "unban"):
+        return
+    if not user_id.isdigit():
+        await interaction.response.send_message("ID invalide.", ephemeral=True)
+        return
+    target_id = int(user_id)
+
+    async def do_unban(confirm_interaction: discord.Interaction):
+        await confirm_interaction.guild.unban(discord.Object(id=target_id), reason=reason or "Unban")
+        await add_mod_action(confirm_interaction.guild.id, target_id, confirm_interaction.user.id, "unban", reason)
+        await send_mod_log(
+            confirm_interaction.guild,
+            build_mod_log_embed("unban", discord.Object(id=target_id), confirm_interaction.user, reason),
+        )
+        await confirm_interaction.response.send_message("✅ Membre débanni.", ephemeral=True)
+
+    await interaction.response.send_message(
+        "Confirmer l'unban ?",
+        view=ModConfirmView(interaction.user.id, do_unban),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="case", description="Afficher le casier d'un membre.")
+@app_commands.describe(member="Membre")
+async def case(interaction: discord.Interaction, member: discord.Member):
+    if not await ensure_mod_permission(interaction, "case"):
+        return
+    warnings = await list_warnings(interaction.guild.id, member.id)
+    actions = await list_mod_actions(interaction.guild.id, member.id)
+    notes = await list_mod_notes(interaction.guild.id, member.id)
+    counts = {}
+    for action in actions:
+        action_type = action["action_type"]
+        counts[action_type] = counts.get(action_type, 0) + 1
+    warn_count = len(warnings)
+    embed = discord.Embed(
+        title=f"Casier de {member.display_name}",
+        color=discord.Color.dark_gold(),
+    )
+    embed.add_field(name="Arrivée", value=str(member.joined_at) if member.joined_at else "Inconnue", inline=False)
+    embed.add_field(
+        name="Stats",
+        value=f"Warns: {warn_count} | Kicks: {counts.get('kick', 0)} | Bans: {counts.get('ban', 0)}",
+        inline=False,
+    )
+    if actions:
+        recent_actions = []
+        for action in actions[:5]:
+            mod_id = action["moderator_id"]
+            reason = action["reason"] or "-"
+            recent_actions.append(f"{action['created_at']} • {action['action_type']} • <@{mod_id}> • {reason}")
+        embed.add_field(name="Historique récent", value="\n".join(recent_actions), inline=False)
+    if notes:
+        last_notes = []
+        for note in notes[:5]:
+            last_notes.append(f"{note['created_at']} • <@{note['moderator_id']}> • {note['note']}")
+        embed.add_field(name="Notes internes", value="\n".join(last_notes), inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="note", description="Ajouter une note interne.")
+@app_commands.describe(member="Membre", note="Note interne")
+async def note(interaction: discord.Interaction, member: discord.Member, note: str):
+    if not await ensure_mod_permission(interaction, "note"):
+        return
+    await add_mod_note(interaction.guild.id, member.id, interaction.user.id, note)
+    await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "note", note)
+    await send_mod_log(
+        interaction.guild,
+        build_mod_log_embed("note", member, interaction.user, note),
+    )
+    await interaction.response.send_message("✅ Note ajoutée.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
