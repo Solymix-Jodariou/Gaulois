@@ -1580,8 +1580,8 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    name_width = 8
-    discord_width = 9
+    name_width = 12
+    discord_width = 14
 
     def truncate_name(name: str) -> str:
         if len(name) <= name_width:
@@ -1603,6 +1603,9 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
             discord_name = member.display_name if member else "-"
         else:
             discord_name = "-"
+        if discord_name != "-":
+            discord_name = re.sub(r"\[{}\]\s*".format(re.escape(CLAN_TAG)), "", discord_name, flags=re.IGNORECASE)
+            discord_name = discord_name.strip()
         if len(discord_name) > discord_width:
             discord_name = discord_name[: discord_width - 3] + "..."
         score = f"{p['score']:.1f}"
