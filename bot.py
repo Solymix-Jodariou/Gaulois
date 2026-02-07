@@ -57,6 +57,10 @@ WIN_NOTIFY_POLL_SECONDS = int(os.getenv("WIN_NOTIFY_POLL_SECONDS", "300"))
 WIN_NOTIFY_RANGE_HOURS = int(os.getenv("WIN_NOTIFY_RANGE_HOURS", "24"))
 WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = int(os.getenv("WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES", "60"))
 OFM_ROLE_ID = int(os.getenv("OFM_ROLE_ID", "1469695783790968963"))
+OFM_MANAGER_ROLE_ID = int(os.getenv("OFM_MANAGER_ROLE_ID", "1469701766223368216"))
+OFM_TEAM_ROLE_ID = int(os.getenv("OFM_TEAM_ROLE_ID", "1469701766223368216"))
+OFM_CATEGORY_ID = int(os.getenv("OFM_CATEGORY_ID", "1469703934514827531"))
+OFM_BOARD_CHANNEL_ID = int(os.getenv("OFM_BOARD_CHANNEL_ID", "1469696688804466972"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -614,6 +618,27 @@ async def init_db():
                 last_scan_missing_game_id INTEGER DEFAULT 0,
                 last_scan_fetch_errors INTEGER DEFAULT 0,
                 last_scan_error TEXT
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ofm_board_message (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ofm_participants (
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                status TEXT NOT NULL,
+                team_role_id BIGINT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
             )
             """
         )
@@ -1537,6 +1562,44 @@ async def build_leaderboard_1v1_gal_embed(guild):
     return embed
 
 
+async def build_ofm_board_embed(guild: discord.Guild):
+    rows = await get_ofm_participants(guild.id, status="accepted")
+    if not rows:
+        description = "Aucun participant accepté pour l'instant."
+    else:
+        lines = []
+        for idx, row in enumerate(rows, start=1):
+            user_id = row["user_id"]
+            team_role_id = row["team_role_id"]
+            team_role = guild.get_role(team_role_id) if team_role_id else None
+            team_text = team_role.mention if team_role else "Sans équipe"
+            lines.append(f"{idx}. <@{user_id}> — {team_text}")
+        description = "\n".join(lines)
+    embed = discord.Embed(
+        title="Participants OFM",
+        description=description,
+        color=discord.Color.blurple(),
+    )
+    return embed
+
+
+async def update_ofm_board(guild: discord.Guild):
+    channel = guild.get_channel(OFM_BOARD_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return
+    record = await get_ofm_board_message(guild.id)
+    embed = await build_ofm_board_embed(guild)
+    if record:
+        try:
+            message = await channel.fetch_message(record["message_id"])
+            await message.edit(embed=embed)
+            return
+        except Exception:
+            await clear_ofm_board_message(guild.id)
+    message = await channel.send(embed=embed)
+    await set_ofm_board_message(guild.id, channel.id, message.id)
+
+
 async def get_leaderboard_message_ffa(guild_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -1629,6 +1692,75 @@ async def clear_leaderboard_message_1v1_gal(guild_id: int):
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM leaderboard_message_1v1_gal WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def get_ofm_board_message(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM ofm_board_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_ofm_board_message(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ofm_board_message (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_ofm_board_message(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM ofm_board_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def upsert_ofm_participant(
+    guild_id: int,
+    user_id: int,
+    status: str,
+    team_role_id: Optional[int] = None,
+):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ofm_participants (guild_id, user_id, status, team_role_id, updated_at)
+            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+            ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                team_role_id = EXCLUDED.team_role_id,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            guild_id,
+            user_id,
+            status,
+            team_role_id,
+        )
+
+
+async def get_ofm_participants(guild_id: int, status: Optional[str] = None):
+    async with pool.acquire() as conn:
+        if status:
+            return await conn.fetch(
+                "SELECT user_id, status, team_role_id FROM ofm_participants WHERE guild_id = $1 AND status = $2",
+                guild_id,
+                status,
+            )
+        return await conn.fetch(
+            "SELECT user_id, status, team_role_id FROM ofm_participants WHERE guild_id = $1",
             guild_id,
         )
 
@@ -1756,7 +1888,84 @@ class OFMConfirmView(discord.ui.View):
             await interaction.response.send_message("Je ne peux pas attribuer ce r\u00f4le (hi\u00e9rarchie).", ephemeral=True)
             return
         await member.add_roles(role, reason="Inscription OFM")
-        await interaction.response.send_message("\u2705 Inscription valid\u00e9e. R\u00f4le OFM attribu\u00e9.", ephemeral=True)
+        channel = None
+        channel_created = False
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        category = interaction.guild.get_channel(OFM_CATEGORY_ID)
+        if not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message(
+                "\u2705 Inscription valid\u00e9e. R\u00f4le OFM attribu\u00e9.\n"
+                "\u26a0\ufe0f Cat\u00e9gorie OFM introuvable pour cr\u00e9er le salon priv\u00e9.",
+                ephemeral=True,
+            )
+            return
+        if not manager_role:
+            await interaction.response.send_message(
+                "\u2705 Inscription valid\u00e9e. R\u00f4le OFM attribu\u00e9.\n"
+                "\u26a0\ufe0f R\u00f4le OFM manager introuvable pour cr\u00e9er le salon priv\u00e9.",
+                ephemeral=True,
+            )
+            return
+        if not bot_member.guild_permissions.manage_channels:
+            await interaction.response.send_message(
+                "\u2705 Inscription valid\u00e9e. R\u00f4le OFM attribu\u00e9.\n"
+                "\u26a0\ufe0f Je n'ai pas la permission de g\u00e9rer les salons.",
+                ephemeral=True,
+            )
+            return
+        topic = f"OFM candidature: {interaction.user.id}"
+        for existing in interaction.guild.text_channels:
+            if existing.topic == topic:
+                channel = existing
+                break
+        if not channel:
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                manager_role: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                ),
+                member: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                ),
+                bot_member: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_channels=True,
+                ),
+            }
+            channel_name = f"ofm-{interaction.user.id}"
+            channel = await interaction.guild.create_text_channel(
+                channel_name,
+                category=category,
+                overwrites=overwrites,
+                topic=topic,
+                reason="Cr\u00e9ation salon candidature OFM",
+            )
+            channel_created = True
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        await upsert_ofm_participant(
+            interaction.guild.id,
+            member.id,
+            "pending",
+            team_role.id if team_role else None,
+        )
+        await update_ofm_board(interaction.guild)
+        if channel_created:
+            await channel.send(
+                f"{manager_role.mention} Nouvelle candidature OFM pour {member.mention}.",
+                view=OFMReviewView(),
+            )
+        channel_line = f"Salon priv\u00e9: {channel.mention}" if channel else ""
+        await interaction.response.send_message(
+            "\u2705 Inscription valid\u00e9e. R\u00f4le OFM attribu\u00e9."
+            + (f"\n{channel_line}" if channel_line else ""),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, custom_id="ofm_cancel")
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -1787,6 +1996,141 @@ class OFMInscriptionView(discord.ui.View):
             view=OFMConfirmView(interaction.user.id),
             ephemeral=True,
         )
+
+
+class OFMReviewView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _ensure_manager(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Commande disponible uniquement sur un serveur.",
+                ephemeral=True,
+            )
+            return False
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if not manager_role or manager_role not in interaction.user.roles:
+            await interaction.response.send_message(
+                "Acc\u00e8s r\u00e9serv\u00e9 aux OFM managers.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _extract_candidate_id(self, interaction: discord.Interaction) -> Optional[int]:
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) or not channel.topic:
+            return None
+        prefix = "OFM candidature: "
+        if not channel.topic.startswith(prefix):
+            return None
+        raw = channel.topic[len(prefix) :].strip()
+        if not raw.isdigit():
+            return None
+        return int(raw)
+
+    async def _get_candidate_member(self, interaction: discord.Interaction) -> Optional[discord.Member]:
+        candidate_id = self._extract_candidate_id(interaction)
+        if not candidate_id or not interaction.guild:
+            await interaction.response.send_message(
+                "Impossible de trouver le candidat (topic du salon).",
+                ephemeral=True,
+            )
+            return None
+        member = interaction.guild.get_member(candidate_id)
+        if not member:
+            try:
+                member = await interaction.guild.fetch_member(candidate_id)
+            except Exception:
+                member = None
+        if not member:
+            await interaction.response.send_message(
+                "Candidat introuvable sur ce serveur.",
+                ephemeral=True,
+            )
+            return None
+        return member
+
+    @discord.ui.button(label="Accepter", style=discord.ButtonStyle.success, custom_id="ofm_review_accept")
+    async def accept(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        member = await self._get_candidate_member(interaction)
+        if not member:
+            return
+        role = interaction.guild.get_role(OFM_ROLE_ID)
+        if role and role not in member.roles:
+            await member.add_roles(role, reason="Candidature OFM acceptée")
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if team_role and team_role not in member.roles:
+            if not manager_role or team_role.id != manager_role.id:
+                await member.add_roles(team_role, reason="Équipe OFM attribuée")
+        await upsert_ofm_participant(
+            interaction.guild.id,
+            member.id,
+            "accepted",
+            team_role.id if team_role else None,
+        )
+        await update_ofm_board(interaction.guild)
+        embed = discord.Embed(
+            title="✅ Candidature OFM",
+            description=f"Statut : **Acceptée**\nCandidat : {member.mention}",
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger, custom_id="ofm_review_refuse")
+    async def refuse(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        member = await self._get_candidate_member(interaction)
+        if not member:
+            return
+        role = interaction.guild.get_role(OFM_ROLE_ID)
+        if role and role in member.roles:
+            await member.remove_roles(role, reason="Candidature OFM refusée")
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if team_role and team_role in member.roles:
+            if not manager_role or team_role.id != manager_role.id:
+                await member.remove_roles(team_role, reason="Candidature OFM refusée")
+        await upsert_ofm_participant(
+            interaction.guild.id,
+            member.id,
+            "refused",
+            team_role.id if team_role else None,
+        )
+        await update_ofm_board(interaction.guild)
+        embed = discord.Embed(
+            title="❌ Candidature OFM",
+            description=f"Statut : **Refusée**\nCandidat : {member.mention}",
+            color=discord.Color.red(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="En attente", style=discord.ButtonStyle.secondary, custom_id="ofm_review_pending")
+    async def pending(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        member = await self._get_candidate_member(interaction)
+        if not member:
+            return
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        await upsert_ofm_participant(
+            interaction.guild.id,
+            member.id,
+            "pending",
+            team_role.id if team_role else None,
+        )
+        await update_ofm_board(interaction.guild)
+        embed = discord.Embed(
+            title="⏳ Candidature OFM",
+            description=f"Statut : **En attente d'examen**\nCandidat : {member.mention}",
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(embed=embed)
 
 
 async def update_leaderboard_message():
@@ -2472,6 +2816,9 @@ async def on_ready():
     bot.add_view(LeaderboardFfaView(1, 20))
     bot.add_view(Leaderboard1v1View(1, 20))
     bot.add_view(OFMInscriptionView())
+    bot.add_view(OFMReviewView())
+    for guild in bot.guilds:
+        bot.loop.create_task(update_ofm_board(guild))
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
     bot.loop.create_task(backfill_1v1_loop())
@@ -2492,6 +2839,36 @@ async def inscription_ofm(interaction: discord.Interaction):
         color=discord.Color.orange(),
     )
     await interaction.response.send_message(embed=embed, view=OFMInscriptionView())
+
+
+@bot.tree.command(name="removeofm", description="Retire un joueur du tournoi OFM.")
+@app_commands.describe(user="Joueur à retirer")
+async def removeofm(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+    if not manager_role or manager_role not in interaction.user.roles:
+        await interaction.response.send_message("Accès réservé aux OFM managers.", ephemeral=True)
+        return
+    role = interaction.guild.get_role(OFM_ROLE_ID)
+    team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+    if role and role in user.roles:
+        await user.remove_roles(role, reason="Retrait OFM demandé")
+    if team_role and team_role in user.roles:
+        if team_role.id != manager_role.id:
+            await user.remove_roles(team_role, reason="Retrait OFM demandé")
+    await upsert_ofm_participant(
+        interaction.guild.id,
+        user.id,
+        "removed",
+        team_role.id if team_role else None,
+    )
+    await update_ofm_board(interaction.guild)
+    await interaction.response.send_message(
+        f"✅ {user.mention} a été retiré du tournoi OFM.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
