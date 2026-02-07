@@ -4522,9 +4522,13 @@ async def setadminpanel(interaction: discord.Interaction):
     if not is_admin_member(interaction.user):
         await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
         return
-    await set_mod_config(interaction.guild.id, log_channel_id=MOD_LOG_CHANNEL_ID)
-    await update_mod_admin_panel(interaction.guild)
-    await interaction.response.send_message("✅ Panel admin mis à jour.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await set_mod_config(interaction.guild.id, log_channel_id=MOD_LOG_CHANNEL_ID)
+        await update_mod_admin_panel(interaction.guild)
+        await interaction.followup.send("✅ Panel admin mis à jour.", ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"❌ Erreur panel admin: {exc}", ephemeral=True)
 
 
 @bot.tree.command(name="warn", description="Avertir un membre.")
