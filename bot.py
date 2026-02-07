@@ -1587,28 +1587,27 @@ DEFAULT_OFM_TEAM_NAME = os.getenv("DEFAULT_OFM_TEAM_NAME", "[GAL] Les gaulois")
 
 async def build_ofm_board_embed(guild: discord.Guild):
     rows = await get_ofm_participants(guild.id, status="accepted")
+    team_name = await get_ofm_team_name(guild.id) or DEFAULT_OFM_TEAM_NAME
     if not rows:
         description = "Aucun participant accepté pour l'instant."
     else:
-        team_name = await get_ofm_team_name(guild.id) or DEFAULT_OFM_TEAM_NAME
         sub_role = guild.get_role(OFM_SUB_ROLE_ID) if OFM_SUB_ROLE_ID else None
         lines = []
         for idx, row in enumerate(rows, start=1):
             user_id = row["user_id"]
-            team_role_id = row["team_role_id"]
-            team_role = guild.get_role(team_role_id) if team_role_id else None
-            team_text = team_role.mention if team_role else team_name
             member = guild.get_member(user_id)
             suffix = ""
             if sub_role and member and sub_role in member.roles:
                 suffix = " (Remplaçant)"
-            lines.append(f"{idx}. <@{user_id}> — {team_text}{suffix}")
+            lines.append(f"{idx}. <@{user_id}>{suffix}")
         description = "\n".join(lines)
     embed = discord.Embed(
-        title="Participants OFM",
+        title=f"Participants OFM \u2014 {team_name}",
         description=description,
-        color=discord.Color.blurple(),
+        color=discord.Color.orange(),
     )
+    if guild and guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
     return embed
 
 
