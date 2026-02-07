@@ -2481,7 +2481,7 @@ async def on_ready():
     print(f"Bot connected: {bot.user}")
 
 
-@bot.tree.command(name="inscriptionOFM", description="Inscription tournoi OFM.")
+@bot.tree.command(name="inscriptionofm", description="Inscription tournoi OFM.")
 async def inscription_ofm(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Inscription Tournoi OFM",
