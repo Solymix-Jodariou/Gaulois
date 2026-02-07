@@ -1319,6 +1319,22 @@ async def get_ffa_player(discord_id: int):
         )
 
 
+async def delete_ffa_player(discord_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "DELETE FROM ffa_players WHERE discord_id = $1 RETURNING player_id",
+            discord_id,
+        )
+
+
+async def delete_ffa_stats_by_player_id(player_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM ffa_stats WHERE player_id = $1",
+            player_id,
+        )
+
+
 async def is_game_processed_1v1(game_id: str) -> bool:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -1499,7 +1515,11 @@ async def load_1v1_leaderboard():
 async def load_ffa_leaderboard():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT pseudo, wins_ffa, losses_ffa, updated_at FROM ffa_stats"
+            """
+            SELECT s.pseudo, s.wins_ffa, s.losses_ffa, s.updated_at, p.discord_id
+            FROM ffa_stats s
+            LEFT JOIN ffa_players p ON p.player_id = s.player_id
+            """
         )
     players = []
     last_updated = None
@@ -1517,6 +1537,7 @@ async def load_ffa_leaderboard():
                 "games": games,
                 "ratio": ratio,
                 "score": score,
+                "discord_id": row[4],
             }
         )
         if row[3] and (last_updated is None or row[3] > last_updated):
@@ -1559,22 +1580,26 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    name_width = 16
+    name_width = 14
+    mention_width = 18
 
     def truncate_name(name: str) -> str:
         if len(name) <= name_width:
             return name
         return name[: name_width - 3] + "..."
 
-    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'SCORE':>5} {'W/L':>7} {'G':>3}"
-    sep = "-" * (name_width + 22)
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'DISCORD':<{mention_width}} {'SCORE':>5} {'W/L':>7} {'G':>3}"
+    sep = "-" * (name_width + mention_width + 30)
     table = [header, sep]
     for i, p in enumerate(page_items, start + 1):
         name = truncate_name(p["display_name"])
+        mention = f"<@{p['discord_id']}>" if p.get("discord_id") else "-"
         score = f"{p['score']:.1f}"
         wl = f"{p['wins']}W/{p['losses']}L"
         games = f"{p['games']}"
-        table.append(f"{i:<3} {name:<{name_width}} {score:>5} {wl:>7} {games:>3}")
+        table.append(
+            f"{i:<3} {name:<{name_width}} {mention:<{mention_width}} {score:>5} {wl:>7} {games:>3}"
+        )
 
     embed.add_field(name="Classement FFA", value="```\n" + "\n".join(table) + "\n```", inline=False)
 
@@ -4654,7 +4679,7 @@ async def setadminpanel(interaction: discord.Interaction):
     if not is_admin_member(interaction.user):
         await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
     try:
         await set_mod_config(interaction.guild.id, log_channel_id=MOD_LOG_CHANNEL_ID)
         await update_mod_admin_panel(interaction.guild)
@@ -4987,6 +5012,25 @@ async def register(interaction: discord.Interaction, pseudo: str, player_id: str
         await interaction.followup.send(f"Erreur: {exc}", ephemeral=True)
         return
     await interaction.followup.send(f"? {pseudo} enregistr� pour le leaderboard FFA.", ephemeral=True)
+
+
+@bot.tree.command(name="unregister", description="Supprime un joueur du leaderboard FFA.")
+@app_commands.describe(user_id="ID Discord \u00e0 d\u00e9sinscrire")
+async def unregister(interaction: discord.Interaction, user_id: str):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not user_id.isdigit():
+        await interaction.response.send_message("ID invalide.", ephemeral=True)
+        return
+    target_id = int(user_id)
+    if interaction.user.id != target_id and not is_admin_member(interaction.user):
+        await interaction.response.send_message("Acc\u00e8s refus\u00e9.", ephemeral=True)
+        return
+    record = await delete_ffa_player(target_id)
+    if record and record.get("player_id"):
+        await delete_ffa_stats_by_player_id(record["player_id"])
+    await interaction.response.send_message("✅ Joueur d\u00e9sinscrit du leaderboard FFA.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboardffa", description="Show the FFA leaderboard.")
