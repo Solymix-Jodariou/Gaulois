@@ -1619,32 +1619,34 @@ async def update_ofm_board(guild: discord.Guild):
 
 def build_ofm_admin_panel_embed():
     embed = discord.Embed(
-        title="Panel OFM Manager",
+        title="✨ Panel OFM Manager",
         description=(
-            "Utilise les boutons ci-dessous pour gérer les membres et l'équipe."
+            "**Centre de commande OFM**\n"
+            "Gérez l'équipe, les rôles et les statuts en un clic."
         ),
-        color=discord.Color.dark_teal(),
+        color=discord.Color.from_rgb(88, 101, 242),
     )
     embed.add_field(
-        name="Gestion des membres",
+        name="👥 Gestion des membres",
         value=(
-            "➕ Ajouter un membre\n"
-            "❌ Retirer un membre\n"
-            "🔝 Promouvoir\n"
-            "⬇️ Rétrograder\n"
-            "📋 Voir la liste des membres"
+            "➕ **Ajouter**\n"
+            "❌ **Retirer**\n"
+            "🔝 **Promouvoir**\n"
+            "⬇️ **Rétrograder**\n"
+            "📋 **Voir la liste**"
         ),
-        inline=False,
+        inline=True,
     )
     embed.add_field(
-        name="Gestion de l'équipe",
+        name="🛡️ Gestion de l'équipe",
         value=(
-            "✏️ Changer le nom de l'équipe\n"
-            "👑 Définir un membre comme leader\n"
-            "🔄 Définir un membre comme remplaçant"
+            "✏️ **Nom d'équipe**\n"
+            "👑 **Définir leader**\n"
+            "🔄 **Définir remplaçant**"
         ),
-        inline=False,
+        inline=True,
     )
+    embed.set_footer(text="Accès réservé • OFM Managers")
     return embed
 
 
