@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import asyncio
 import re
@@ -56,6 +56,7 @@ WIN_NOTIFY_CHANNEL_ID = os.getenv("WIN_NOTIFY_CHANNEL_ID")
 WIN_NOTIFY_POLL_SECONDS = int(os.getenv("WIN_NOTIFY_POLL_SECONDS", "300"))
 WIN_NOTIFY_RANGE_HOURS = int(os.getenv("WIN_NOTIFY_RANGE_HOURS", "24"))
 WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = int(os.getenv("WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES", "60"))
+OFM_ROLE_ID = int(os.getenv("OFM_ROLE_ID", "1469695783790968963"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -1716,6 +1717,78 @@ class Leaderboard1v1View(discord.ui.View):
         await self.update(interaction, min(total_pages, self.page + 1))
 
 
+class OFMConfirmView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def _ensure_user(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Ce bouton ne t'est pas destin\u00e9.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.success, custom_id="ofm_confirm")
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_user(interaction):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        role = interaction.guild.get_role(OFM_ROLE_ID)
+        if not role:
+            await interaction.response.send_message("R\u00f4le OFM introuvable.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(interaction.user.id)
+        if not member:
+            member = await interaction.guild.fetch_member(interaction.user.id)
+        if role in member.roles:
+            await interaction.response.send_message("Tu as d\u00e9j\u00e0 le r\u00f4le OFM.", ephemeral=True)
+            return
+        bot_member = interaction.guild.me
+        if not bot_member or not bot_member.guild_permissions.manage_roles:
+            await interaction.response.send_message("Je n'ai pas la permission de g\u00e9rer les r\u00f4les.", ephemeral=True)
+            return
+        if bot_member.top_role <= role:
+            await interaction.response.send_message("Je ne peux pas attribuer ce r\u00f4le (hi\u00e9rarchie).", ephemeral=True)
+            return
+        await member.add_roles(role, reason="Inscription OFM")
+        await interaction.response.send_message("\u2705 Inscription valid\u00e9e. R\u00f4le OFM attribu\u00e9.", ephemeral=True)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, custom_id="ofm_cancel")
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_user(interaction):
+            return
+        await interaction.response.send_message("Inscription annul\u00e9e.", ephemeral=True)
+
+
+class OFMInscriptionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="S'inscrire", style=discord.ButtonStyle.primary, custom_id="ofm_join")
+    async def join(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="Confirmation OFM",
+            description=(
+                "Es-tu s\u00fbr de vouloir \u00eatre l'un des participants ?\n"
+                "Cette action est irr\u00e9m\u00e9diable."
+            ),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=OFMConfirmView(interaction.user.id),
+            ephemeral=True,
+        )
+
+
 async def update_leaderboard_message():
     if not bot.guilds:
         return
@@ -2398,6 +2471,7 @@ async def on_ready():
     bot.add_view(LeaderboardView(1, 20))
     bot.add_view(LeaderboardFfaView(1, 20))
     bot.add_view(Leaderboard1v1View(1, 20))
+    bot.add_view(OFMInscriptionView())
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
     bot.loop.create_task(backfill_1v1_loop())
@@ -2405,6 +2479,19 @@ async def on_ready():
     if WIN_NOTIFY_CHANNEL_ID:
         bot.loop.create_task(win_notify_loop())
     print(f"Bot connected: {bot.user}")
+
+
+@bot.tree.command(name="inscriptionOFM", description="Inscription tournoi OFM.")
+async def inscription_ofm(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Inscription Tournoi OFM",
+        description=(
+            "Clique sur le bouton si tu souhaites devenir l'un des participants\n"
+            "pour le tournoi OFM sous le tag [GAL]."
+        ),
+        color=discord.Color.orange(),
+    )
+    await interaction.response.send_message(embed=embed, view=OFMInscriptionView())
 
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
