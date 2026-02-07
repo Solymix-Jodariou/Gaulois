@@ -5020,9 +5020,11 @@ async def setleaderboardffa(interaction: discord.Interaction):
         )
         return
 
-    await interaction.followup.send(embed=embed, view=LeaderboardFfaView(1, 20))
-    message = await interaction.original_response()
-    await set_leaderboard_message_ffa(interaction.guild.id, interaction.channel_id, message.id)
+    try:
+        message = await interaction.followup.send(embed=embed, view=LeaderboardFfaView(1, 20), wait=True)
+        await set_leaderboard_message_ffa(interaction.guild.id, interaction.channel_id, message.id)
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur leaderboard FFA: {exc}", ephemeral=True)
 
 
 @bot.tree.command(name="removeleaderboardffa", description="Supprime le leaderboard FFA du serveur.")
@@ -5030,9 +5032,23 @@ async def removeleaderboardffa(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
         return
+    await interaction.response.defer(ephemeral=True)
     record = await get_leaderboard_message_ffa(interaction.guild.id)
     if not record:
-        await interaction.response.send_message("Aucun leaderboard FFA actif.", ephemeral=True)
+        channel = interaction.channel
+        if isinstance(channel, discord.TextChannel):
+            try:
+                async for msg in channel.history(limit=50):
+                    if msg.author == bot.user and msg.embeds:
+                        title = msg.embeds[0].title or ""
+                        if "Leaderboard FFA" in title:
+                            await msg.delete()
+                            await clear_leaderboard_message_ffa(interaction.guild.id)
+                            await interaction.followup.send("Leaderboard FFA supprim\u00e9.", ephemeral=True)
+                            return
+            except Exception:
+                pass
+        await interaction.followup.send("Aucun leaderboard FFA actif.", ephemeral=True)
         return
     try:
         channel = bot.get_channel(record["channel_id"]) or await bot.fetch_channel(record["channel_id"])
@@ -5041,7 +5057,7 @@ async def removeleaderboardffa(interaction: discord.Interaction):
     except Exception:
         pass
     await clear_leaderboard_message_ffa(interaction.guild.id)
-    await interaction.response.send_message("Leaderboard FFA supprim�.", ephemeral=True)
+    await interaction.followup.send("Leaderboard FFA supprim\u00e9.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboard1v1", description="Show the 1v1 leaderboard.")
