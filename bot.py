@@ -1595,7 +1595,12 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
         name = truncate_name(p["display_name"])
         if p.get("discord_id") and guild:
             member = guild.get_member(p["discord_id"])
-            discord_name = member.display_name if member else str(p["discord_id"])
+            if not member:
+                try:
+                    member = await guild.fetch_member(p["discord_id"])
+                except Exception:
+                    member = None
+            discord_name = member.display_name if member else "-"
         else:
             discord_name = "-"
         score = f"{p['score']:.1f}"
@@ -5006,7 +5011,7 @@ async def register(interaction: discord.Interaction, pseudo: str, player_id: str
     if not is_pseudo_valid(pseudo):
         await interaction.response.send_message("Pseudo invalide (pas de #).", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
     try:
         await upsert_ffa_player(interaction.user.id, pseudo, player_id)
         sessions = await fetch_player_sessions(player_id)
@@ -5042,7 +5047,7 @@ async def setleaderboardffa(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
 
     record = await get_leaderboard_message_ffa(interaction.guild.id)
     if record:
