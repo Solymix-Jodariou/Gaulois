@@ -1817,11 +1817,12 @@ def build_mod_admin_panel_embed(
 ):
     role_text = selected_role.mention if selected_role else "Aucun rôle sélectionné"
     allowed_text = ", ".join(allowed_commands) if allowed_commands else "Aucune autorisation"
+    role_line = f"Rôle sélectionné : {role_text}\n" if mode == "permissions" else ""
     embed = discord.Embed(
         title="🛡️ Panel Administration",
         description=(
             "Configure les permissions et exécute les actions de modération.\n"
-            f"Rôle sélectionné : {role_text}\n"
+            f"{role_line}"
             f"Autorisations : {allowed_text}\n"
             f"Mode : **{mode}**"
         ),
@@ -3584,17 +3585,17 @@ class ModAdminPanelView(discord.ui.View):
         mode_select.callback = self._on_mode_select
         self.add_item(mode_select)
 
-        if role_options:
-            role_select = discord.ui.Select(
-                placeholder="Sélectionner un rôle...",
-                options=role_options,
-                custom_id="mod_role_select",
-                row=1,
-            )
-            role_select.callback = self._on_role_select
-            self.add_item(role_select)
-
         if self.mode == "permissions":
+            if role_options:
+                role_select = discord.ui.Select(
+                    placeholder="Sélectionner un rôle...",
+                    options=role_options,
+                    custom_id="mod_role_select",
+                    row=1,
+                )
+                role_select.callback = self._on_role_select
+                self.add_item(role_select)
+
             command_options = [
                 discord.SelectOption(
                     label=cmd,
@@ -3667,9 +3668,9 @@ class ModAdminPanelView(discord.ui.View):
         await interaction.response.edit_message(view=view)
 
     async def _on_mode_select(self, interaction: discord.Interaction):
-        if not await self._ensure_admin(interaction):
-            return
         selected = interaction.data["values"][0]
+        if selected == "permissions" and not await self._ensure_admin(interaction):
+            return
         await update_mod_admin_panel(
             interaction.guild,
             selected_role_id=self.selected_role_id,
