@@ -5021,7 +5021,17 @@ async def setleaderboardffa(interaction: discord.Interaction):
         return
 
     try:
-        embed = await build_leaderboard_ffa_embed(interaction.guild, 1, 20)
+        try:
+            embed = await asyncio.wait_for(
+                build_leaderboard_ffa_embed(interaction.guild, 1, 20),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "Le leaderboard FFA prend trop de temps à se générer.",
+                ephemeral=True,
+            )
+            return
         if not embed:
             await interaction.followup.send(
                 f"Aucune donn\u00e9e FFA. Enregistre-toi avec /register.",
