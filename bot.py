@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import re
+from io import BytesIO
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 
@@ -230,6 +231,33 @@ def compute_ffa_stats_from_sessions(sessions):
             else:
                 losses += 1
     return wins, losses
+
+
+def summarize_ffa_sessions(sessions):
+    ffa_sessions = [s for s in sessions if is_ffa_session(s)]
+    def session_key(s):
+        dt = get_session_time(s)
+        return dt or datetime.min.replace(tzinfo=timezone.utc)
+    ffa_sessions.sort(key=session_key, reverse=True)
+    wins, losses = compute_ffa_stats_from_sessions(ffa_sessions)
+    games = wins + losses
+    winrate = (wins / games * 100) if games else 0.0
+    last10 = ffa_sessions[:10]
+    last10_wins = sum(1 for s in last10 if s.get("hasWon"))
+    streak = 0
+    for s in ffa_sessions:
+        if s.get("hasWon"):
+            streak += 1
+        else:
+            break
+    return {
+        "wins": wins,
+        "losses": losses,
+        "games": games,
+        "winrate": winrate,
+        "last10_wins": last10_wins,
+        "streak": streak,
+    }
 
 
 def is_ffa_session(session: dict) -> bool:
@@ -1282,6 +1310,14 @@ async def get_ffa_players():
         )
 
 
+async def get_ffa_player(discord_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT discord_id, pseudo, player_id FROM ffa_players WHERE discord_id = $1",
+            discord_id,
+        )
+
+
 async def is_game_processed_1v1(game_id: str) -> bool:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -1904,6 +1940,97 @@ def build_mod_log_embed(
         embed.add_field(name="Durée", value=format_duration(duration_seconds), inline=True)
     embed.timestamp = datetime.now(timezone.utc)
     return embed
+
+
+def build_compare_chart(player_a: dict, player_b: dict, clan_tag: str) -> BytesIO:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    bg = "#0B0F1A"
+    grid = "#1E2638"
+    color_a = "#19E6FF"
+    color_b = "#FF2ED1"
+
+    stats_a = player_a["stats"]
+    stats_b = player_b["stats"]
+
+    fig = plt.figure(figsize=(12, 7), facecolor=bg)
+    fig.subplots_adjust(left=0.06, right=0.97, top=0.9, bottom=0.08)
+
+    ax_bar = fig.add_subplot(1, 2, 1)
+    ax_radar = fig.add_subplot(1, 2, 2, polar=True)
+
+    fig.text(0.02, 0.94, f"[{clan_tag}]", color=color_a, fontsize=14, fontweight="bold")
+    fig.text(0.5, 0.94, "DUEL COMPARATIF", ha="center", color="white", fontsize=16, fontweight="bold")
+    fig.text(
+        0.5,
+        0.90,
+        f"{player_a['name']}  vs  {player_b['name']}",
+        ha="center",
+        color="#B5C3D6",
+        fontsize=11,
+    )
+
+    metrics = ["Wins", "Losses", "Games", "Winrate%", "Streak"]
+    values_a = [stats_a["wins"], stats_a["losses"], stats_a["games"], stats_a["winrate"], stats_a["streak"]]
+    values_b = [stats_b["wins"], stats_b["losses"], stats_b["games"], stats_b["winrate"], stats_b["streak"]]
+
+    y = range(len(metrics))
+    ax_bar.barh([i + 0.15 for i in y], values_a, height=0.28, color=color_a, alpha=0.85, label=player_a["name"])
+    ax_bar.barh([i - 0.15 for i in y], values_b, height=0.28, color=color_b, alpha=0.85, label=player_b["name"])
+    ax_bar.set_yticks(list(y))
+    ax_bar.set_yticklabels(metrics, color="white")
+    ax_bar.tick_params(axis="x", colors="#9FB3C8")
+    ax_bar.set_facecolor(bg)
+    ax_bar.grid(axis="x", color=grid, alpha=0.4)
+    ax_bar.spines["top"].set_visible(False)
+    ax_bar.spines["right"].set_visible(False)
+    ax_bar.spines["left"].set_color(grid)
+    ax_bar.spines["bottom"].set_color(grid)
+    ax_bar.legend(loc="lower right", frameon=False, fontsize=9, labelcolor="white")
+
+    radar_labels = ["Wins", "Winrate", "Games", "Streak", "Losses"]
+    loss_max = max(stats_a["losses"], stats_b["losses"], 1)
+    radar_a = [
+        stats_a["wins"],
+        stats_a["winrate"],
+        stats_a["games"],
+        stats_a["streak"],
+        loss_max - stats_a["losses"],
+    ]
+    radar_b = [
+        stats_b["wins"],
+        stats_b["winrate"],
+        stats_b["games"],
+        stats_b["streak"],
+        loss_max - stats_b["losses"],
+    ]
+    max_vals = [max(radar_a[i], radar_b[i], 1) for i in range(len(radar_labels))]
+    norm_a = [radar_a[i] / max_vals[i] for i in range(len(radar_labels))]
+    norm_b = [radar_b[i] / max_vals[i] for i in range(len(radar_labels))]
+    angles = [n / float(len(radar_labels)) * 2 * 3.14159 for n in range(len(radar_labels))]
+    angles += angles[:1]
+    norm_a += norm_a[:1]
+    norm_b += norm_b[:1]
+
+    ax_radar.set_facecolor(bg)
+    ax_radar.set_theta_offset(3.14159 / 2)
+    ax_radar.set_theta_direction(-1)
+    ax_radar.set_xticks(angles[:-1])
+    ax_radar.set_xticklabels(radar_labels, color="white", fontsize=9)
+    ax_radar.set_yticklabels([])
+    ax_radar.grid(color=grid, alpha=0.4)
+    ax_radar.plot(angles, norm_a, color=color_a, linewidth=2)
+    ax_radar.fill(angles, norm_a, color=color_a, alpha=0.25)
+    ax_radar.plot(angles, norm_b, color=color_b, linewidth=2)
+    ax_radar.fill(angles, norm_b, color=color_b, alpha=0.25)
+
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, facecolor=bg)
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer
 
 
 async def ensure_mod_permission(interaction: discord.Interaction, command: str) -> bool:
@@ -4533,6 +4660,46 @@ async def setadminpanel(interaction: discord.Interaction):
         await interaction.followup.send("✅ Panel admin mis à jour.", ephemeral=True)
     except Exception as exc:
         await interaction.followup.send(f"❌ Erreur panel admin: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="compare", description="Comparer deux joueurs enregistrés.")
+@app_commands.describe(player1="Joueur 1", player2="Joueur 2")
+async def compare(interaction: discord.Interaction, player1: discord.Member, player2: discord.Member):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=False)
+    rec1 = await get_ffa_player(player1.id)
+    rec2 = await get_ffa_player(player2.id)
+    if not rec1 or not rec2:
+        await interaction.followup.send(
+            "Les deux joueurs doivent être enregistrés via /register.",
+            ephemeral=True,
+        )
+        return
+    try:
+        sessions1 = await fetch_player_sessions(rec1["player_id"])
+        sessions2 = await fetch_player_sessions(rec2["player_id"])
+    except Exception as exc:
+        await interaction.followup.send(f"Erreur OpenFront: {exc}", ephemeral=True)
+        return
+    stats1 = summarize_ffa_sessions(sessions1)
+    stats2 = summarize_ffa_sessions(sessions2)
+    label1 = f"{rec1['pseudo']} ({player1.display_name})"
+    label2 = f"{rec2['pseudo']} ({player2.display_name})"
+    chart = build_compare_chart(
+        {"name": label1, "stats": stats1},
+        {"name": label2, "stats": stats2},
+        CLAN_TAG,
+    )
+    file = discord.File(chart, filename="compare.png")
+    embed = discord.Embed(
+        title=f"Comparatif [GAL] {rec1['pseudo']} vs {rec2['pseudo']}",
+        description="Comparaison basée sur les stats OpenFront FFA.",
+        color=discord.Color.orange(),
+    )
+    embed.set_image(url="attachment://compare.png")
+    await interaction.followup.send(embed=embed, file=file)
 
 
 @bot.tree.command(name="warn", description="Avertir un membre.")
