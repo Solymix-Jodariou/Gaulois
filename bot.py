@@ -203,8 +203,17 @@ def format_duration(seconds: Optional[int]) -> str:
     return f"{seconds}s"
 
 
-def is_admin_user(user_id: int) -> bool:
+def is_admin_user_id(user_id: int) -> bool:
     return user_id in {FOUNDER_USER_ID, ADMIN_USER_ID}
+
+
+def is_admin_member(member: discord.Member) -> bool:
+    if member.id == member.guild.owner_id:
+        return True
+    if is_admin_user_id(member.id):
+        return True
+    role_ids = {role.id for role in member.roles}
+    return bool(role_ids.intersection({FOUNDER_USER_ID, ADMIN_USER_ID}))
 
 
 def is_pseudo_valid(pseudo: str) -> bool:
@@ -2358,7 +2367,7 @@ async def list_mod_notes(guild_id: int, user_id: int):
 
 
 async def has_mod_permission(guild: discord.Guild, member: discord.Member, command: str) -> bool:
-    if is_admin_user(member.id):
+    if is_admin_member(member):
         return True
     allowed_roles = await get_allowed_roles_for_command(guild.id, command)
     if not allowed_roles:
@@ -2373,7 +2382,7 @@ def can_moderate_member(actor: discord.Member, target: discord.Member, bot_membe
     if target == bot_member:
         return "Action impossible sur le bot."
     if target.id == actor.guild.owner_id or target.top_role >= actor.top_role:
-        if not is_admin_user(actor.id) and actor.id != actor.guild.owner_id:
+        if not is_admin_member(actor) and actor.id != actor.guild.owner_id:
             return "Impossible de sanctionner un supérieur."
     if target.top_role >= bot_member.top_role:
         return "Le bot ne peut pas sanctionner ce membre (hiérarchie)."
@@ -3127,7 +3136,7 @@ class ModDefaultsModal(discord.ui.Modal):
         if not interaction.guild:
             await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
             return
-        if not is_admin_user(interaction.user.id):
+        if not is_admin_member(interaction.user):
             await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
             return
         mute_value = str(self.default_mute.value).strip()
@@ -3233,7 +3242,7 @@ class ModAdminPanelView(discord.ui.View):
         if not interaction.guild:
             await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
             return False
-        if not is_admin_user(interaction.user.id):
+        if not is_admin_member(interaction.user):
             await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
             return False
         return True
@@ -4056,7 +4065,7 @@ async def setadminpanel(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
         return
-    if not is_admin_user(interaction.user.id):
+    if not is_admin_member(interaction.user):
         await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
         return
     await set_mod_config(interaction.guild.id, log_channel_id=MOD_LOG_CHANNEL_ID)
