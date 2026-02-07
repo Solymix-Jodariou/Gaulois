@@ -59,8 +59,11 @@ WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = int(os.getenv("WIN_NOTIFY_EMPTY_COOLDOWN_MIN
 OFM_ROLE_ID = int(os.getenv("OFM_ROLE_ID", "1469695783790968963"))
 OFM_MANAGER_ROLE_ID = int(os.getenv("OFM_MANAGER_ROLE_ID", "1469701081759219723"))
 OFM_TEAM_ROLE_ID = int(os.getenv("OFM_TEAM_ROLE_ID", "1469701766223368216"))
+OFM_LEADER_ROLE_ID = int(os.getenv("OFM_LEADER_ROLE_ID", "0"))
+OFM_SUB_ROLE_ID = int(os.getenv("OFM_SUB_ROLE_ID", "0"))
 OFM_CATEGORY_ID = int(os.getenv("OFM_CATEGORY_ID", "1469703934514827531"))
 OFM_BOARD_CHANNEL_ID = int(os.getenv("OFM_BOARD_CHANNEL_ID", "1469696688804466972"))
+OFM_ADMIN_CHANNEL_ID = int(os.getenv("OFM_ADMIN_CHANNEL_ID", "1469711880565162201"))
 
 if RANGE_HOURS > 48:
     RANGE_HOURS = 48
@@ -639,6 +642,15 @@ async def init_db():
                 team_role_id BIGINT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_id, user_id)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ofm_admin_panel_message (
+                guild_id BIGINT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
             )
             """
         )
@@ -1600,6 +1612,54 @@ async def update_ofm_board(guild: discord.Guild):
     await set_ofm_board_message(guild.id, channel.id, message.id)
 
 
+def build_ofm_admin_panel_embed():
+    embed = discord.Embed(
+        title="Panel OFM Manager",
+        description=(
+            "Utilise les boutons ci-dessous pour gérer les membres et l'équipe."
+        ),
+        color=discord.Color.dark_teal(),
+    )
+    embed.add_field(
+        name="Gestion des membres",
+        value=(
+            "➕ Ajouter un membre\n"
+            "❌ Retirer un membre\n"
+            "🔝 Promouvoir\n"
+            "⬇️ Rétrograder\n"
+            "📋 Voir la liste des membres"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Gestion de l'équipe",
+        value=(
+            "✏️ Changer le nom de l'équipe\n"
+            "👑 Définir un membre comme leader\n"
+            "🔄 Définir un membre comme remplaçant"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def update_ofm_admin_panel(guild: discord.Guild):
+    channel = guild.get_channel(OFM_ADMIN_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return
+    record = await get_ofm_admin_panel_message(guild.id)
+    embed = build_ofm_admin_panel_embed()
+    if record:
+        try:
+            message = await channel.fetch_message(record["message_id"])
+            await message.edit(embed=embed, view=OFMConfigView())
+            return
+        except Exception:
+            await clear_ofm_admin_panel_message(guild.id)
+    message = await channel.send(embed=embed, view=OFMConfigView())
+    await set_ofm_admin_panel_message(guild.id, channel.id, message.id)
+
+
 async def get_leaderboard_message_ffa(guild_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -1761,6 +1821,38 @@ async def get_ofm_participants(guild_id: int, status: Optional[str] = None):
             )
         return await conn.fetch(
             "SELECT user_id, status, team_role_id FROM ofm_participants WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def get_ofm_admin_panel_message(guild_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT guild_id, channel_id, message_id FROM ofm_admin_panel_message WHERE guild_id = $1",
+            guild_id,
+        )
+
+
+async def set_ofm_admin_panel_message(guild_id: int, channel_id: int, message_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ofm_admin_panel_message (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                message_id = EXCLUDED.message_id
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+
+async def clear_ofm_admin_panel_message(guild_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM ofm_admin_panel_message WHERE guild_id = $1",
             guild_id,
         )
 
@@ -2141,6 +2233,234 @@ class OFMReviewView(discord.ui.View):
             color=discord.Color.orange(),
         )
         await interaction.response.send_message(embed=embed)
+
+
+class OFMMemberIdModal(discord.ui.Modal):
+    def __init__(self, title: str, action_key: str):
+        super().__init__(title=title)
+        self.action_key = action_key
+        self.user_id = discord.ui.TextInput(
+            label="ID Discord",
+            placeholder="Ex: 272094371711680512",
+            required=True,
+            max_length=32,
+        )
+        self.add_item(self.user_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member_id = int(raw)
+        try:
+            member = interaction.guild.get_member(member_id) or await interaction.guild.fetch_member(member_id)
+        except Exception:
+            member = None
+        if not member:
+            await interaction.response.send_message("Membre introuvable.", ephemeral=True)
+            return
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if not manager_role or manager_role not in interaction.user.roles:
+            await interaction.response.send_message("Accès réservé aux OFM managers.", ephemeral=True)
+            return
+        role = interaction.guild.get_role(OFM_ROLE_ID)
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        leader_role = interaction.guild.get_role(OFM_LEADER_ROLE_ID) if OFM_LEADER_ROLE_ID else None
+        sub_role = interaction.guild.get_role(OFM_SUB_ROLE_ID) if OFM_SUB_ROLE_ID else None
+
+        if self.action_key == "add_member":
+            if role and role not in member.roles:
+                await member.add_roles(role, reason="OFM: ajout membre")
+            if team_role and team_role not in member.roles:
+                await member.add_roles(team_role, reason="OFM: ajout équipe")
+            await upsert_ofm_participant(
+                interaction.guild.id,
+                member.id,
+                "accepted",
+                team_role.id if team_role else None,
+            )
+            await update_ofm_board(interaction.guild)
+            await interaction.response.send_message(f"✅ {member.mention} ajouté.", ephemeral=True)
+            return
+
+        if self.action_key == "remove_member":
+            if role and role in member.roles:
+                await member.remove_roles(role, reason="OFM: retrait membre")
+            if team_role and team_role in member.roles:
+                await member.remove_roles(team_role, reason="OFM: retrait équipe")
+            if leader_role and leader_role in member.roles:
+                await member.remove_roles(leader_role, reason="OFM: retrait leader")
+            if sub_role and sub_role in member.roles:
+                await member.remove_roles(sub_role, reason="OFM: retrait remplaçant")
+            await upsert_ofm_participant(
+                interaction.guild.id,
+                member.id,
+                "removed",
+                team_role.id if team_role else None,
+            )
+            await update_ofm_board(interaction.guild)
+            await interaction.response.send_message(f"✅ {member.mention} retiré.", ephemeral=True)
+            return
+
+        if self.action_key == "promote":
+            if not leader_role:
+                await interaction.response.send_message("Rôle leader non configuré.", ephemeral=True)
+                return
+            if leader_role not in member.roles:
+                await member.add_roles(leader_role, reason="OFM: promotion leader")
+            await interaction.response.send_message(f"✅ {member.mention} promu.", ephemeral=True)
+            return
+
+        if self.action_key == "demote":
+            if not leader_role:
+                await interaction.response.send_message("Rôle leader non configuré.", ephemeral=True)
+                return
+            if leader_role in member.roles:
+                await member.remove_roles(leader_role, reason="OFM: rétrogradation")
+            await interaction.response.send_message(f"✅ {member.mention} rétrogradé.", ephemeral=True)
+            return
+
+        if self.action_key == "set_leader":
+            if not leader_role:
+                await interaction.response.send_message("Rôle leader non configuré.", ephemeral=True)
+                return
+            if leader_role not in member.roles:
+                await member.add_roles(leader_role, reason="OFM: définir leader")
+            await interaction.response.send_message(f"✅ {member.mention} est leader.", ephemeral=True)
+            return
+
+        if self.action_key == "set_sub":
+            if not sub_role:
+                await interaction.response.send_message("Rôle remplaçant non configuré.", ephemeral=True)
+                return
+            if sub_role not in member.roles:
+                await member.add_roles(sub_role, reason="OFM: définir remplaçant")
+            await interaction.response.send_message(f"✅ {member.mention} est remplaçant.", ephemeral=True)
+            return
+
+
+class OFMTeamNameModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Changer le nom de l'équipe")
+        self.team_name = discord.ui.TextInput(
+            label="Nouveau nom",
+            placeholder="Ex: Team Gaulois",
+            required=True,
+            max_length=100,
+        )
+        self.add_item(self.team_name)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if not manager_role or manager_role not in interaction.user.roles:
+            await interaction.response.send_message("Accès réservé aux OFM managers.", ephemeral=True)
+            return
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        if not team_role:
+            await interaction.response.send_message("Rôle d'équipe introuvable.", ephemeral=True)
+            return
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.manage_roles:
+            await interaction.response.send_message("Je n'ai pas la permission de gérer les rôles.", ephemeral=True)
+            return
+        await team_role.edit(name=str(self.team_name.value).strip(), reason="OFM: changement nom équipe")
+        await interaction.response.send_message("✅ Nom d'équipe mis à jour.", ephemeral=True)
+
+
+class OFMConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _ensure_manager(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Commande disponible uniquement sur un serveur.",
+                ephemeral=True,
+            )
+            return False
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if not manager_role or manager_role not in interaction.user.roles:
+            await interaction.response.send_message(
+                "Accès réservé aux OFM managers.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Ajouter un membre", emoji="➕", style=discord.ButtonStyle.success, custom_id="ofm_add_member")
+    async def add_member(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMMemberIdModal("Ajouter un membre", "add_member"))
+
+    @discord.ui.button(label="Retirer un membre", emoji="❌", style=discord.ButtonStyle.danger, custom_id="ofm_remove_member")
+    async def remove_member(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMMemberIdModal("Retirer un membre", "remove_member"))
+
+    @discord.ui.button(label="Promouvoir", emoji="🔝", style=discord.ButtonStyle.primary, custom_id="ofm_promote")
+    async def promote(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMMemberIdModal("Promouvoir", "promote"))
+
+    @discord.ui.button(label="Rétrograder", emoji="⬇️", style=discord.ButtonStyle.secondary, custom_id="ofm_demote")
+    async def demote(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMMemberIdModal("Rétrograder", "demote"))
+
+    @discord.ui.button(label="Voir la liste", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="ofm_list_members")
+    async def list_members(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        leader_role = interaction.guild.get_role(OFM_LEADER_ROLE_ID) if OFM_LEADER_ROLE_ID else None
+        sub_role = interaction.guild.get_role(OFM_SUB_ROLE_ID) if OFM_SUB_ROLE_ID else None
+        members = team_role.members if team_role else []
+        if not members:
+            await interaction.response.send_message("Aucun membre dans l'équipe.", ephemeral=True)
+            return
+        lines = []
+        for member in members:
+            tags = []
+            if leader_role and leader_role in member.roles:
+                tags.append("leader")
+            if sub_role and sub_role in member.roles:
+                tags.append("remplaçant")
+            tag_text = f" ({', '.join(tags)})" if tags else ""
+            lines.append(f"- {member.mention}{tag_text}")
+        embed = discord.Embed(
+            title="Membres OFM",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Changer le nom", emoji="✏️", style=discord.ButtonStyle.primary, custom_id="ofm_team_name")
+    async def change_team_name(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMTeamNameModal())
+
+    @discord.ui.button(label="Définir leader", emoji="👑", style=discord.ButtonStyle.primary, custom_id="ofm_set_leader")
+    async def set_leader(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMMemberIdModal("Définir leader", "set_leader"))
+
+    @discord.ui.button(label="Définir remplaçant", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="ofm_set_sub")
+    async def set_sub(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_manager(interaction):
+            return
+        await interaction.response.send_modal(OFMMemberIdModal("Définir remplaçant", "set_sub"))
 
 
 async def update_leaderboard_message():
@@ -2827,8 +3147,10 @@ async def on_ready():
     bot.add_view(Leaderboard1v1View(1, 20))
     bot.add_view(OFMInscriptionView())
     bot.add_view(OFMReviewView())
+    bot.add_view(OFMConfigView())
     for guild in bot.guilds:
         bot.loop.create_task(update_ofm_board(guild))
+        bot.loop.create_task(update_ofm_admin_panel(guild))
     bot.loop.create_task(backfill_loop())
     bot.loop.create_task(live_loop())
     bot.loop.create_task(backfill_1v1_loop())
@@ -2879,6 +3201,19 @@ async def removeofm(interaction: discord.Interaction, user: discord.Member):
         f"✅ {user.mention} a été retiré du tournoi OFM.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="setofmpanel", description="Créer/mettre à jour le panel OFM manager.")
+async def setofmpanel(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+    if not manager_role or manager_role not in interaction.user.roles:
+        await interaction.response.send_message("Accès réservé aux OFM managers.", ephemeral=True)
+        return
+    await update_ofm_admin_panel(interaction.guild)
+    await interaction.response.send_message("✅ Panel OFM mis à jour.", ephemeral=True)
 
 
 @bot.tree.command(name="setleaderboard", description="Show the clan leaderboard.")
