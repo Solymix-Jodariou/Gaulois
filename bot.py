@@ -5021,6 +5021,8 @@ async def setleaderboardffa(interaction: discord.Interaction):
         return
 
     try:
+        await refresh_ffa_stats()
+        embed = await build_leaderboard_ffa_embed(interaction.guild, 1, 20)
         message = await interaction.followup.send(embed=embed, view=LeaderboardFfaView(1, 20), wait=True)
         await set_leaderboard_message_ffa(interaction.guild.id, interaction.channel_id, message.id)
     except Exception as exc:
