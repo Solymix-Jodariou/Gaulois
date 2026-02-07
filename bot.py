@@ -1579,13 +1579,18 @@ async def build_ofm_board_embed(guild: discord.Guild):
     if not rows:
         description = "Aucun participant accepté pour l'instant."
     else:
+        sub_role = guild.get_role(OFM_SUB_ROLE_ID) if OFM_SUB_ROLE_ID else None
         lines = []
         for idx, row in enumerate(rows, start=1):
             user_id = row["user_id"]
             team_role_id = row["team_role_id"]
             team_role = guild.get_role(team_role_id) if team_role_id else None
             team_text = team_role.mention if team_role else "Sans équipe"
-            lines.append(f"{idx}. <@{user_id}> — {team_text}")
+            member = guild.get_member(user_id)
+            suffix = ""
+            if sub_role and member and sub_role in member.roles:
+                suffix = " (Remplaçant)"
+            lines.append(f"{idx}. <@{user_id}> — {team_text}{suffix}")
         description = "\n".join(lines)
     embed = discord.Embed(
         title="Participants OFM",
@@ -2373,6 +2378,75 @@ class OFMTeamNameModal(discord.ui.Modal):
         await interaction.response.send_message("✅ Nom d'équipe mis à jour.", ephemeral=True)
 
 
+class OFMReplacementModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Définir un remplaçant")
+        self.absent_id = discord.ui.TextInput(
+            label="ID du joueur absent",
+            placeholder="Ex: 272094371711680512",
+            required=False,
+            max_length=32,
+        )
+        self.replacement_id = discord.ui.TextInput(
+            label="ID du remplaçant",
+            placeholder="Ex: 123456789012345678",
+            required=True,
+            max_length=32,
+        )
+        self.add_item(self.absent_id)
+        self.add_item(self.replacement_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        manager_role = interaction.guild.get_role(OFM_MANAGER_ROLE_ID)
+        if not manager_role or manager_role not in interaction.user.roles:
+            await interaction.response.send_message("Accès réservé aux OFM managers.", ephemeral=True)
+            return
+        raw_replacement = str(self.replacement_id.value).strip()
+        if not raw_replacement.isdigit():
+            await interaction.response.send_message("ID remplaçant invalide.", ephemeral=True)
+            return
+        replacement_id = int(raw_replacement)
+        try:
+            replacement = (
+                interaction.guild.get_member(replacement_id)
+                or await interaction.guild.fetch_member(replacement_id)
+            )
+        except Exception:
+            replacement = None
+        if not replacement:
+            await interaction.response.send_message("Remplaçant introuvable.", ephemeral=True)
+            return
+        role = interaction.guild.get_role(OFM_ROLE_ID)
+        team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
+        sub_role = interaction.guild.get_role(OFM_SUB_ROLE_ID) if OFM_SUB_ROLE_ID else None
+        if role and role not in replacement.roles:
+            await replacement.add_roles(role, reason="OFM: ajout remplaçant")
+        if team_role and team_role not in replacement.roles:
+            await replacement.add_roles(team_role, reason="OFM: ajout remplaçant équipe")
+        if sub_role and sub_role not in replacement.roles:
+            await replacement.add_roles(sub_role, reason="OFM: marquer remplaçant")
+        await upsert_ofm_participant(
+            interaction.guild.id,
+            replacement.id,
+            "accepted",
+            team_role.id if team_role else None,
+        )
+        await update_ofm_board(interaction.guild)
+
+        absent_line = ""
+        raw_absent = str(self.absent_id.value).strip()
+        if raw_absent.isdigit():
+            absent_id = int(raw_absent)
+            absent_line = f" (remplace <@{absent_id}>)"
+        await interaction.response.send_message(
+            f"✅ {replacement.mention} ajouté comme remplaçant{absent_line}.",
+            ephemeral=True,
+        )
+
+
 class OFMConfigView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2460,7 +2534,7 @@ class OFMConfigView(discord.ui.View):
     async def set_sub(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if not await self._ensure_manager(interaction):
             return
-        await interaction.response.send_modal(OFMMemberIdModal("Définir remplaçant", "set_sub"))
+        await interaction.response.send_modal(OFMReplacementModal())
 
 
 async def update_leaderboard_message():
