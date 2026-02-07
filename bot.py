@@ -1580,16 +1580,16 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
     if guild and guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
-    name_width = 9
-    discord_width = 11
+    name_width = 8
+    discord_width = 9
 
     def truncate_name(name: str) -> str:
         if len(name) <= name_width:
             return name
         return name[: name_width - 3] + "..."
 
-    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'DISCORD':<{discord_width}} {'SCORE':>7} {'W/L':>9} {'G':>4}"
-    sep = "-" * (name_width + discord_width + 35)
+    header = f"{'#':<3} {'JOUEUR':<{name_width}} {'DISCORD':<{discord_width}} {'SCORE':>6} {'W/L':>7} {'G':>3}"
+    sep = "-" * (name_width + discord_width + 30)
     table = [header, sep]
     for i, p in enumerate(page_items, start + 1):
         name = truncate_name(p["display_name"])
@@ -1604,10 +1604,10 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
         else:
             discord_name = "-"
         score = f"{p['score']:.1f}"
-        wl = f"{p['wins']}W/{p['losses']}L"
+        wl = f"{p['wins']}/{p['losses']}"
         games = f"{p['games']}"
         table.append(
-            f"{i:<3} {name:<{name_width}} {discord_name:<{discord_width}} {score:>7} {wl:>9} {games:>4}"
+            f"{i:<3} {name:<{name_width}} {discord_name:<{discord_width}} {score:>6} {wl:>7} {games:>3}"
         )
 
     embed.add_field(name="Classement FFA", value="```\n" + "\n".join(table) + "\n```", inline=False)
