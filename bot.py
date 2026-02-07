@@ -5021,13 +5021,6 @@ async def setleaderboardffa(interaction: discord.Interaction):
         return
 
     try:
-        try:
-            await asyncio.wait_for(refresh_ffa_stats(), timeout=20)
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                "La resync FFA prend trop de temps, affichage avec les données actuelles.",
-                ephemeral=True,
-            )
         embed = await build_leaderboard_ffa_embed(interaction.guild, 1, 20)
         if not embed:
             await interaction.followup.send(
@@ -5037,6 +5030,7 @@ async def setleaderboardffa(interaction: discord.Interaction):
             return
         message = await interaction.followup.send(embed=embed, view=LeaderboardFfaView(1, 20), wait=True)
         await set_leaderboard_message_ffa(interaction.guild.id, interaction.channel_id, message.id)
+        bot.loop.create_task(refresh_ffa_stats())
     except Exception as exc:
         await interaction.followup.send(f"Erreur leaderboard FFA: {exc}", ephemeral=True)
 
