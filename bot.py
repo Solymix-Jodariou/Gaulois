@@ -1582,18 +1582,22 @@ async def build_leaderboard_1v1_gal_embed(guild):
     return embed
 
 
+DEFAULT_OFM_TEAM_NAME = os.getenv("DEFAULT_OFM_TEAM_NAME", "[GAL] Les gaulois")
+
+
 async def build_ofm_board_embed(guild: discord.Guild):
     rows = await get_ofm_participants(guild.id, status="accepted")
     if not rows:
         description = "Aucun participant accepté pour l'instant."
     else:
+        team_name = await get_ofm_team_name(guild.id) or DEFAULT_OFM_TEAM_NAME
         sub_role = guild.get_role(OFM_SUB_ROLE_ID) if OFM_SUB_ROLE_ID else None
         lines = []
         for idx, row in enumerate(rows, start=1):
             user_id = row["user_id"]
             team_role_id = row["team_role_id"]
             team_role = guild.get_role(team_role_id) if team_role_id else None
-            team_text = team_role.mention if team_role else "Sans équipe"
+            team_text = team_role.mention if team_role else team_name
             member = guild.get_member(user_id)
             suffix = ""
             if sub_role and member and sub_role in member.roles:
@@ -1626,7 +1630,7 @@ async def update_ofm_board(guild: discord.Guild):
 
 
 async def build_ofm_admin_panel_embed(guild: discord.Guild):
-    team_name = await get_ofm_team_name(guild.id) or "Equipe OFM"
+    team_name = await get_ofm_team_name(guild.id) or DEFAULT_OFM_TEAM_NAME
     embed = discord.Embed(
         title="✨ Panel OFM Manager",
         description=(
