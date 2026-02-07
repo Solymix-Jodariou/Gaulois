@@ -5002,10 +5002,11 @@ async def setleaderboardffa(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
         return
+    await interaction.response.defer(ephemeral=True)
 
     record = await get_leaderboard_message_ffa(interaction.guild.id)
     if record:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Un leaderboard FFA est d�j� actif. Utilise /removeleaderboardffa.",
             ephemeral=True,
         )
@@ -5013,13 +5014,13 @@ async def setleaderboardffa(interaction: discord.Interaction):
 
     embed = await build_leaderboard_ffa_embed(interaction.guild, 1, 20)
     if not embed:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Aucune donn�e FFA. Enregistre-toi avec /register.",
             ephemeral=True,
         )
         return
 
-    await interaction.response.send_message(embed=embed, view=LeaderboardFfaView(1, 20))
+    await interaction.followup.send(embed=embed, view=LeaderboardFfaView(1, 20))
     message = await interaction.original_response()
     await set_leaderboard_message_ffa(interaction.guild.id, interaction.channel_id, message.id)
 
