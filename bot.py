@@ -1813,6 +1813,7 @@ def build_mod_admin_panel_embed(
     guild: discord.Guild,
     selected_role: Optional[discord.Role] = None,
     allowed_commands: Optional[list] = None,
+    mode: str = "permissions",
 ):
     role_text = selected_role.mention if selected_role else "Aucun rôle sélectionné"
     allowed_text = ", ".join(allowed_commands) if allowed_commands else "Aucune autorisation"
@@ -1821,7 +1822,8 @@ def build_mod_admin_panel_embed(
         description=(
             "Configure les permissions et exécute les actions de modération.\n"
             f"Rôle sélectionné : {role_text}\n"
-            f"Autorisations : {allowed_text}"
+            f"Autorisations : {allowed_text}\n"
+            f"Mode : **{mode}**"
         ),
         color=discord.Color.red(),
     )
@@ -1843,7 +1845,11 @@ def build_mod_admin_panel_embed(
     return embed
 
 
-async def update_mod_admin_panel(guild: discord.Guild, selected_role_id: Optional[int] = None):
+async def update_mod_admin_panel(
+    guild: discord.Guild,
+    selected_role_id: Optional[int] = None,
+    mode: str = "permissions",
+):
     channel = guild.get_channel(ADMIN_PANEL_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
         return
@@ -1851,10 +1857,13 @@ async def update_mod_admin_panel(guild: discord.Guild, selected_role_id: Optiona
     selected_role = guild.get_role(selected_role_id) if selected_role_id else None
     allowed_commands = None
     if selected_role:
-        perms = await get_permissions_for_role(guild.id, selected_role.id)
-        allowed_commands = [p["command"] for p in perms if p["allowed"]]
-    embed = build_mod_admin_panel_embed(guild, selected_role, allowed_commands)
-    view = ModAdminPanelView(guild_id=guild.id, selected_role_id=selected_role_id)
+        if selected_role.id in {FOUNDER_USER_ID, ADMIN_USER_ID}:
+            allowed_commands = list(MOD_COMMANDS)
+        else:
+            perms = await get_permissions_for_role(guild.id, selected_role.id)
+            allowed_commands = [p["command"] for p in perms if p["allowed"]]
+    embed = build_mod_admin_panel_embed(guild, selected_role, allowed_commands, mode)
+    view = ModAdminPanelView(guild_id=guild.id, selected_role_id=selected_role_id, mode=mode)
     if record:
         try:
             message = await channel.fetch_message(record["message_id"])
@@ -3177,12 +3186,378 @@ class ModConfirmView(discord.ui.View):
         if not await self._ensure_requester(interaction):
             return
         await interaction.response.send_message("Action annulée.", ephemeral=True)
+
+
+class ModWarnModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Warn un membre")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.reason = discord.ui.TextInput(label="Raison", required=True, max_length=200)
+        self.add_item(self.user_id)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "warn"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(raw)) or await interaction.guild.fetch_member(int(raw))
+        bot_member = interaction.guild.me
+        err = can_moderate_member(interaction.user, member, bot_member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        record = await add_warning(interaction.guild.id, member.id, interaction.user.id, str(self.reason.value))
+        await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "warn", str(self.reason.value))
+        await send_mod_log(
+            interaction.guild,
+            build_mod_log_embed("warn", member, interaction.user, str(self.reason.value)),
+        )
+        await interaction.response.send_message(f"✅ Warn ajouté (ID {record['id']}).", ephemeral=True)
+
+
+class ModWarnListModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Warnlist")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.add_item(self.user_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "warnlist"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        user_id = int(raw)
+        rows = await list_warnings(interaction.guild.id, user_id)
+        if not rows:
+            await interaction.response.send_message("Aucun warn.", ephemeral=True)
+            return
+        lines = []
+        for row in rows[:15]:
+            lines.append(f"#{row['id']} • <@{row['moderator_id']}> • {row['created_at']}\n{row['reason']}")
+        embed = discord.Embed(
+            title=f"Warns de <@{user_id}>",
+            description="\n\n".join(lines),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ModClearWarnModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Clearwarn")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.warn_id = discord.ui.TextInput(label="ID du warn (vide = tout)", required=False, max_length=32)
+        self.add_item(self.user_id)
+        self.add_item(self.warn_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "clearwarn"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        user_id = int(raw)
+        warn_raw = str(self.warn_id.value).strip()
+        if warn_raw:
+            if not warn_raw.isdigit():
+                await interaction.response.send_message("ID warn invalide.", ephemeral=True)
+                return
+            await delete_warning(interaction.guild.id, user_id, int(warn_raw))
+            await add_mod_action(interaction.guild.id, user_id, interaction.user.id, "clearwarn", f"warn_id={warn_raw}")
+            await send_mod_log(
+                interaction.guild,
+                build_mod_log_embed("clearwarn", discord.Object(id=user_id), interaction.user, f"warn_id={warn_raw}"),
+            )
+            await interaction.response.send_message("✅ Warn supprimé.", ephemeral=True)
+            return
+
+        async def do_clear(confirm_interaction: discord.Interaction):
+            await clear_all_warnings(confirm_interaction.guild.id, user_id)
+            await add_mod_action(confirm_interaction.guild.id, user_id, confirm_interaction.user.id, "clearwarn", "all")
+            await send_mod_log(
+                confirm_interaction.guild,
+                build_mod_log_embed("clearwarn", discord.Object(id=user_id), confirm_interaction.user, "all"),
+            )
+            await confirm_interaction.response.send_message("✅ Tous les warns ont été supprimés.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Confirmer la suppression de tous les warns ?",
+            view=ModConfirmView(interaction.user.id, do_clear),
+            ephemeral=True,
+        )
+
+
+class ModMuteModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Mute/Timeout")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.duration = discord.ui.TextInput(label="Durée (ex: 10m, 2h)", required=False, max_length=16)
+        self.reason = discord.ui.TextInput(label="Raison", required=False, max_length=200)
+        self.add_item(self.user_id)
+        self.add_item(self.duration)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "mute"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(raw)) or await interaction.guild.fetch_member(int(raw))
+        bot_member = interaction.guild.me
+        err = can_moderate_member(interaction.user, member, bot_member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        seconds = parse_duration_seconds(str(self.duration.value).strip()) if str(self.duration.value).strip() else None
+        if seconds is None:
+            config = await get_mod_config(interaction.guild.id)
+            seconds = config["default_mute_seconds"] if config else 3600
+        until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        reason = str(self.reason.value).strip() or None
+        await member.timeout(until, reason=reason or "Mute")
+        await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "mute", reason, seconds)
+        await send_mod_log(
+            interaction.guild,
+            build_mod_log_embed("mute", member, interaction.user, reason, seconds),
+        )
+        await interaction.response.send_message("✅ Mute appliqué.", ephemeral=True)
+
+
+class ModKickModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Kick")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.reason = discord.ui.TextInput(label="Raison", required=False, max_length=200)
+        self.add_item(self.user_id)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "kick"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(raw)) or await interaction.guild.fetch_member(int(raw))
+        bot_member = interaction.guild.me
+        err = can_moderate_member(interaction.user, member, bot_member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        reason = str(self.reason.value).strip() or None
+
+        async def do_kick(confirm_interaction: discord.Interaction):
+            await member.kick(reason=reason or "Kick")
+            await add_mod_action(confirm_interaction.guild.id, member.id, confirm_interaction.user.id, "kick", reason)
+            await send_mod_log(
+                confirm_interaction.guild,
+                build_mod_log_embed("kick", member, confirm_interaction.user, reason),
+            )
+            await confirm_interaction.response.send_message("✅ Membre kick.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Confirmer le kick ?",
+            view=ModConfirmView(interaction.user.id, do_kick),
+            ephemeral=True,
+        )
+
+
+class ModBanModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Ban")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.duration = discord.ui.TextInput(label="Durée (ex: 7d, vide=permanent)", required=False, max_length=16)
+        self.reason = discord.ui.TextInput(label="Raison", required=False, max_length=200)
+        self.add_item(self.user_id)
+        self.add_item(self.duration)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "ban"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(raw)) or await interaction.guild.fetch_member(int(raw))
+        bot_member = interaction.guild.me
+        err = can_moderate_member(interaction.user, member, bot_member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        seconds = parse_duration_seconds(str(self.duration.value).strip()) if str(self.duration.value).strip() else None
+        if str(self.duration.value).strip() and seconds is None:
+            await interaction.response.send_message("Durée invalide.", ephemeral=True)
+            return
+        if seconds is None:
+            config = await get_mod_config(interaction.guild.id)
+            seconds = config["default_ban_seconds"] if config else 0
+        reason = str(self.reason.value).strip() or None
+
+        async def do_ban(confirm_interaction: discord.Interaction):
+            await confirm_interaction.guild.ban(member, reason=reason or "Ban", delete_message_days=0)
+            await add_mod_action(confirm_interaction.guild.id, member.id, confirm_interaction.user.id, "ban", reason, seconds or None)
+            await send_mod_log(
+                confirm_interaction.guild,
+                build_mod_log_embed("ban", member, confirm_interaction.user, reason, seconds or None),
+            )
+            if seconds:
+                bot.loop.create_task(schedule_unban(confirm_interaction.guild, member.id, seconds))
+            await confirm_interaction.response.send_message("✅ Membre banni.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Confirmer le ban ?",
+            view=ModConfirmView(interaction.user.id, do_ban),
+            ephemeral=True,
+        )
+
+
+class ModUnbanModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Unban")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.reason = discord.ui.TextInput(label="Raison", required=False, max_length=200)
+        self.add_item(self.user_id)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "unban"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        target_id = int(raw)
+        reason = str(self.reason.value).strip() or None
+
+        async def do_unban(confirm_interaction: discord.Interaction):
+            await confirm_interaction.guild.unban(discord.Object(id=target_id), reason=reason or "Unban")
+            await add_mod_action(confirm_interaction.guild.id, target_id, confirm_interaction.user.id, "unban", reason)
+            await send_mod_log(
+                confirm_interaction.guild,
+                build_mod_log_embed("unban", discord.Object(id=target_id), confirm_interaction.user, reason),
+            )
+            await confirm_interaction.response.send_message("✅ Membre débanni.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Confirmer l'unban ?",
+            view=ModConfirmView(interaction.user.id, do_unban),
+            ephemeral=True,
+        )
+
+
+class ModCaseModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Casier")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.add_item(self.user_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "case"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(raw)) or await interaction.guild.fetch_member(int(raw))
+        warnings = await list_warnings(interaction.guild.id, member.id)
+        actions = await list_mod_actions(interaction.guild.id, member.id)
+        notes = await list_mod_notes(interaction.guild.id, member.id)
+        counts = {}
+        for action in actions:
+            action_type = action["action_type"]
+            counts[action_type] = counts.get(action_type, 0) + 1
+        warn_count = len(warnings)
+        embed = discord.Embed(
+            title=f"Casier de {member.display_name}",
+            color=discord.Color.dark_gold(),
+        )
+        embed.add_field(name="Arrivée", value=str(member.joined_at) if member.joined_at else "Inconnue", inline=False)
+        embed.add_field(
+            name="Stats",
+            value=f"Warns: {warn_count} | Kicks: {counts.get('kick', 0)} | Bans: {counts.get('ban', 0)}",
+            inline=False,
+        )
+        if notes:
+            last_notes = []
+            for note in notes[:5]:
+                last_notes.append(f"{note['created_at']} • <@{note['moderator_id']}> • {note['note']}")
+            embed.add_field(name="Notes internes", value="\n".join(last_notes), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ModNoteModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Note interne")
+        self.user_id = discord.ui.TextInput(label="ID Discord", required=True, max_length=32)
+        self.note = discord.ui.TextInput(label="Note", required=True, max_length=300)
+        self.add_item(self.user_id)
+        self.add_item(self.note)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "note"):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("ID invalide.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(raw)) or await interaction.guild.fetch_member(int(raw))
+        note_text = str(self.note.value).strip()
+        await add_mod_note(interaction.guild.id, member.id, interaction.user.id, note_text)
+        await add_mod_action(interaction.guild.id, member.id, interaction.user.id, "note", note_text)
+        await send_mod_log(
+            interaction.guild,
+            build_mod_log_embed("note", member, interaction.user, note_text),
+        )
+        await interaction.response.send_message("✅ Note ajoutée.", ephemeral=True)
 class ModAdminPanelView(discord.ui.View):
-    def __init__(self, guild_id: Optional[int] = None, selected_role_id: Optional[int] = None, selected_command: Optional[str] = None):
+    def __init__(
+        self,
+        guild_id: Optional[int] = None,
+        selected_role_id: Optional[int] = None,
+        selected_command: Optional[str] = None,
+        mode: str = "permissions",
+    ):
         super().__init__(timeout=None)
         self.guild_id = guild_id
         self.selected_role_id = selected_role_id
         self.selected_command = selected_command
+        self.mode = mode
 
         role_options = []
         guild = bot.get_guild(guild_id) if guild_id else None
@@ -3197,6 +3572,17 @@ class ModAdminPanelView(discord.ui.View):
                         default=(role.id == selected_role_id),
                     )
                 )
+        mode_select = discord.ui.Select(
+            placeholder="Choisir un mode...",
+            options=[
+                discord.SelectOption(label="Permissions", value="permissions", default=(mode == "permissions")),
+                discord.SelectOption(label="Sanctions", value="sanctions", default=(mode == "sanctions")),
+            ],
+            custom_id="mod_mode_select",
+        )
+        mode_select.callback = self._on_mode_select
+        self.add_item(mode_select)
+
         if role_options:
             role_select = discord.ui.Select(
                 placeholder="Sélectionner un rôle...",
@@ -3206,26 +3592,37 @@ class ModAdminPanelView(discord.ui.View):
             role_select.callback = self._on_role_select
             self.add_item(role_select)
 
-        command_options = [
-            discord.SelectOption(
-                label=cmd,
-                value=cmd,
-                default=(cmd == selected_command),
+        if self.mode == "permissions":
+            command_options = [
+                discord.SelectOption(
+                    label=cmd,
+                    value=cmd,
+                    default=(cmd == selected_command),
+                )
+                for cmd in MOD_COMMANDS
+            ]
+            command_select = discord.ui.Select(
+                placeholder="Sélectionner une commande...",
+                options=command_options,
+                custom_id="mod_command_select",
             )
-            for cmd in MOD_COMMANDS
-        ]
-        command_select = discord.ui.Select(
-            placeholder="Sélectionner une commande...",
-            options=command_options,
-            custom_id="mod_command_select",
-        )
-        command_select.callback = self._on_command_select
-        self.add_item(command_select)
+            command_select.callback = self._on_command_select
+            self.add_item(command_select)
 
-        self._add_button("Autoriser", "✅", discord.ButtonStyle.success, "mod_allow", self._allow, 2)
-        self._add_button("Retirer", "⛔", discord.ButtonStyle.danger, "mod_deny", self._deny, 2)
-        self._add_button("Voir permissions", "📋", discord.ButtonStyle.secondary, "mod_view", self._view, 3)
-        self._add_button("Configurer durées", "⏱️", discord.ButtonStyle.primary, "mod_defaults", self._defaults, 3)
+            self._add_button("Autoriser", "✅", discord.ButtonStyle.success, "mod_allow", self._allow, 2)
+            self._add_button("Retirer", "⛔", discord.ButtonStyle.danger, "mod_deny", self._deny, 2)
+            self._add_button("Voir permissions", "📋", discord.ButtonStyle.secondary, "mod_view", self._view, 3)
+            self._add_button("Configurer durées", "⏱️", discord.ButtonStyle.primary, "mod_defaults", self._defaults, 3)
+        else:
+            self._add_button("Warn", "⚠️", discord.ButtonStyle.primary, "mod_warn", self._panel_warn, 2)
+            self._add_button("Warnlist", "📋", discord.ButtonStyle.secondary, "mod_warnlist", self._panel_warnlist, 2)
+            self._add_button("Clearwarn", "🧹", discord.ButtonStyle.danger, "mod_clearwarn", self._panel_clearwarn, 2)
+            self._add_button("Mute", "🔇", discord.ButtonStyle.secondary, "mod_mute", self._panel_mute, 3)
+            self._add_button("Kick", "👢", discord.ButtonStyle.danger, "mod_kick", self._panel_kick, 3)
+            self._add_button("Ban", "🔨", discord.ButtonStyle.danger, "mod_ban", self._panel_ban, 3)
+            self._add_button("Unban", "🔓", discord.ButtonStyle.success, "mod_unban", self._panel_unban, 4)
+            self._add_button("Case", "🗂️", discord.ButtonStyle.secondary, "mod_case", self._panel_case, 4)
+            self._add_button("Note", "📝", discord.ButtonStyle.primary, "mod_note", self._panel_note, 4)
 
     def _add_button(self, label, emoji, style, custom_id, callback, row):
         button = discord.ui.Button(
@@ -3251,7 +3648,7 @@ class ModAdminPanelView(discord.ui.View):
         if not await self._ensure_admin(interaction):
             return
         selected = int(interaction.data["values"][0])
-        await update_mod_admin_panel(interaction.guild, selected_role_id=selected)
+        await update_mod_admin_panel(interaction.guild, selected_role_id=selected, mode=self.mode)
         await interaction.response.defer()
 
     async def _on_command_select(self, interaction: discord.Interaction):
@@ -3262,8 +3659,20 @@ class ModAdminPanelView(discord.ui.View):
             guild_id=interaction.guild.id,
             selected_role_id=self.selected_role_id,
             selected_command=selected,
+            mode=self.mode,
         )
         await interaction.response.edit_message(view=view)
+
+    async def _on_mode_select(self, interaction: discord.Interaction):
+        if not await self._ensure_admin(interaction):
+            return
+        selected = interaction.data["values"][0]
+        await update_mod_admin_panel(
+            interaction.guild,
+            selected_role_id=self.selected_role_id,
+            mode=selected,
+        )
+        await interaction.response.defer()
 
     async def _allow(self, interaction: discord.Interaction):
         if not await self._ensure_admin(interaction):
@@ -3272,7 +3681,7 @@ class ModAdminPanelView(discord.ui.View):
             await interaction.response.send_message("Sélectionne un rôle et une commande.", ephemeral=True)
             return
         await set_mod_permission(interaction.guild.id, self.selected_role_id, self.selected_command, True)
-        await update_mod_admin_panel(interaction.guild, selected_role_id=self.selected_role_id)
+        await update_mod_admin_panel(interaction.guild, selected_role_id=self.selected_role_id, mode=self.mode)
         await interaction.response.send_message("✅ Permission accordée.", ephemeral=True)
 
     async def _deny(self, interaction: discord.Interaction):
@@ -3282,7 +3691,7 @@ class ModAdminPanelView(discord.ui.View):
             await interaction.response.send_message("Sélectionne un rôle et une commande.", ephemeral=True)
             return
         await set_mod_permission(interaction.guild.id, self.selected_role_id, self.selected_command, False)
-        await update_mod_admin_panel(interaction.guild, selected_role_id=self.selected_role_id)
+        await update_mod_admin_panel(interaction.guild, selected_role_id=self.selected_role_id, mode=self.mode)
         await interaction.response.send_message("✅ Permission retirée.", ephemeral=True)
 
     async def _view(self, interaction: discord.Interaction):
@@ -3303,6 +3712,51 @@ class ModAdminPanelView(discord.ui.View):
         if not await self._ensure_admin(interaction):
             return
         await interaction.response.send_modal(ModDefaultsModal())
+
+    async def _panel_warn(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "warn"):
+            return
+        await interaction.response.send_modal(ModWarnModal())
+
+    async def _panel_warnlist(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "warnlist"):
+            return
+        await interaction.response.send_modal(ModWarnListModal())
+
+    async def _panel_clearwarn(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "clearwarn"):
+            return
+        await interaction.response.send_modal(ModClearWarnModal())
+
+    async def _panel_mute(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "mute"):
+            return
+        await interaction.response.send_modal(ModMuteModal())
+
+    async def _panel_kick(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "kick"):
+            return
+        await interaction.response.send_modal(ModKickModal())
+
+    async def _panel_ban(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "ban"):
+            return
+        await interaction.response.send_modal(ModBanModal())
+
+    async def _panel_unban(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "unban"):
+            return
+        await interaction.response.send_modal(ModUnbanModal())
+
+    async def _panel_case(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "case"):
+            return
+        await interaction.response.send_modal(ModCaseModal())
+
+    async def _panel_note(self, interaction: discord.Interaction):
+        if not await ensure_mod_permission(interaction, "note"):
+            return
+        await interaction.response.send_modal(ModNoteModal())
 
 
 async def update_leaderboard_message():
