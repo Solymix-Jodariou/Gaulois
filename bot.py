@@ -1603,6 +1603,8 @@ async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
             discord_name = member.display_name if member else "-"
         else:
             discord_name = "-"
+        if len(discord_name) > discord_width:
+            discord_name = discord_name[: discord_width - 3] + "..."
         score = f"{p['score']:.1f}"
         wl = f"{p['wins']}/{p['losses']}"
         games = f"{p['games']}"
