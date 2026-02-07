@@ -3579,6 +3579,7 @@ class ModAdminPanelView(discord.ui.View):
                 discord.SelectOption(label="Sanctions", value="sanctions", default=(mode == "sanctions")),
             ],
             custom_id="mod_mode_select",
+            row=0,
         )
         mode_select.callback = self._on_mode_select
         self.add_item(mode_select)
@@ -3588,6 +3589,7 @@ class ModAdminPanelView(discord.ui.View):
                 placeholder="Sélectionner un rôle...",
                 options=role_options,
                 custom_id="mod_role_select",
+                row=1,
             )
             role_select.callback = self._on_role_select
             self.add_item(role_select)
@@ -3605,14 +3607,15 @@ class ModAdminPanelView(discord.ui.View):
                 placeholder="Sélectionner une commande...",
                 options=command_options,
                 custom_id="mod_command_select",
+                row=2,
             )
             command_select.callback = self._on_command_select
             self.add_item(command_select)
 
-            self._add_button("Autoriser", "✅", discord.ButtonStyle.success, "mod_allow", self._allow, 2)
-            self._add_button("Retirer", "⛔", discord.ButtonStyle.danger, "mod_deny", self._deny, 2)
-            self._add_button("Voir permissions", "📋", discord.ButtonStyle.secondary, "mod_view", self._view, 3)
-            self._add_button("Configurer durées", "⏱️", discord.ButtonStyle.primary, "mod_defaults", self._defaults, 3)
+            self._add_button("Autoriser", "✅", discord.ButtonStyle.success, "mod_allow", self._allow, 3)
+            self._add_button("Retirer", "⛔", discord.ButtonStyle.danger, "mod_deny", self._deny, 3)
+            self._add_button("Voir permissions", "📋", discord.ButtonStyle.secondary, "mod_view", self._view, 4)
+            self._add_button("Configurer durées", "⏱️", discord.ButtonStyle.primary, "mod_defaults", self._defaults, 4)
         else:
             self._add_button("Warn", "⚠️", discord.ButtonStyle.primary, "mod_warn", self._panel_warn, 2)
             self._add_button("Warnlist", "📋", discord.ButtonStyle.secondary, "mod_warnlist", self._panel_warnlist, 2)
