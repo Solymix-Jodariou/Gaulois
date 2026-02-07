@@ -2450,8 +2450,23 @@ class OFMReplacementModal(discord.ui.Modal):
 
 
 class OFMConfigView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, section: str = "members"):
         super().__init__(timeout=None)
+        self.section = section
+        select = discord.ui.Select(
+            placeholder="Choisir une section...",
+            options=[
+                discord.SelectOption(label="Gestion des membres", value="members", emoji="👥"),
+                discord.SelectOption(label="Gestion de l'équipe", value="team", emoji="🛡️"),
+            ],
+            custom_id="ofm_section_select",
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        if self.section == "members":
+            self._add_members_buttons()
+        else:
+            self._add_team_buttons()
 
     async def _ensure_manager(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -2469,32 +2484,56 @@ class OFMConfigView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Ajouter un membre", emoji="➕", style=discord.ButtonStyle.success, custom_id="ofm_add_member", row=0)
-    async def add_member(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _on_select(self, interaction: discord.Interaction):
+        if not await self._ensure_manager(interaction):
+            return
+        selected = self.children[0].values[0]
+        await interaction.response.edit_message(view=OFMConfigView(section=selected))
+
+    def _add_button(self, label, emoji, style, custom_id, callback, row):
+        button = discord.ui.Button(
+            label=label,
+            emoji=emoji,
+            style=style,
+            custom_id=custom_id,
+            row=row,
+        )
+        button.callback = callback
+        self.add_item(button)
+
+    def _add_members_buttons(self):
+        self._add_button("Ajouter un membre", "➕", discord.ButtonStyle.success, "ofm_add_member", self._add_member, 1)
+        self._add_button("Retirer un membre", "❌", discord.ButtonStyle.danger, "ofm_remove_member", self._remove_member, 1)
+        self._add_button("Promouvoir", "🔝", discord.ButtonStyle.primary, "ofm_promote", self._promote, 2)
+        self._add_button("Rétrograder", "⬇️", discord.ButtonStyle.secondary, "ofm_demote", self._demote, 2)
+        self._add_button("Voir la liste", "📋", discord.ButtonStyle.secondary, "ofm_list_members", self._list_members, 3)
+
+    def _add_team_buttons(self):
+        self._add_button("Changer le nom", "✏️", discord.ButtonStyle.primary, "ofm_team_name", self._change_team_name, 1)
+        self._add_button("Définir leader", "👑", discord.ButtonStyle.primary, "ofm_set_leader", self._set_leader, 2)
+        self._add_button("Définir remplaçant", "🔄", discord.ButtonStyle.secondary, "ofm_set_sub", self._set_sub, 2)
+
+    async def _add_member(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMMemberIdModal("Ajouter un membre", "add_member"))
 
-    @discord.ui.button(label="Retirer un membre", emoji="❌", style=discord.ButtonStyle.danger, custom_id="ofm_remove_member", row=0)
-    async def remove_member(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _remove_member(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMMemberIdModal("Retirer un membre", "remove_member"))
 
-    @discord.ui.button(label="Promouvoir", emoji="🔝", style=discord.ButtonStyle.primary, custom_id="ofm_promote", row=0)
-    async def promote(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _promote(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMMemberIdModal("Promouvoir", "promote"))
 
-    @discord.ui.button(label="Rétrograder", emoji="⬇️", style=discord.ButtonStyle.secondary, custom_id="ofm_demote", row=1)
-    async def demote(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _demote(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMMemberIdModal("Rétrograder", "demote"))
 
-    @discord.ui.button(label="Voir la liste", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="ofm_list_members", row=1)
-    async def list_members(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _list_members(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         team_role = interaction.guild.get_role(OFM_TEAM_ROLE_ID)
@@ -2520,20 +2559,17 @@ class OFMConfigView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Changer le nom", emoji="✏️", style=discord.ButtonStyle.primary, custom_id="ofm_team_name", row=1)
-    async def change_team_name(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _change_team_name(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMTeamNameModal())
 
-    @discord.ui.button(label="Définir leader", emoji="👑", style=discord.ButtonStyle.primary, custom_id="ofm_set_leader", row=2)
-    async def set_leader(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _set_leader(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMMemberIdModal("Définir leader", "set_leader"))
 
-    @discord.ui.button(label="Définir remplaçant", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="ofm_set_sub", row=2)
-    async def set_sub(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _set_sub(self, interaction: discord.Interaction):
         if not await self._ensure_manager(interaction):
             return
         await interaction.response.send_modal(OFMReplacementModal())
