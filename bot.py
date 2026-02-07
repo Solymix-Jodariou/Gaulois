@@ -1863,6 +1863,15 @@ class OFMConfirmView(discord.ui.View):
             return False
         return True
 
+    @staticmethod
+    def _slugify_channel_name(raw_name: str, fallback: str) -> str:
+        name = raw_name.strip().lower()
+        name = re.sub(r"[^a-z0-9]+", "-", name)
+        name = name.strip("-")
+        if not name:
+            return fallback
+        return name[:60].strip("-") or fallback
+
     @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.success, custom_id="ofm_confirm")
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if not await self._ensure_user(interaction):
@@ -1938,7 +1947,8 @@ class OFMConfirmView(discord.ui.View):
                     manage_channels=True,
                 ),
             }
-            channel_name = f"ofm-{interaction.user.id}"
+            pretty = self._slugify_channel_name(member.display_name, f"ofm-{interaction.user.id}")
+            channel_name = f"ofm-{pretty}" if pretty != f"ofm-{interaction.user.id}" else pretty
             channel = await interaction.guild.create_text_channel(
                 channel_name,
                 category=category,
