@@ -5649,7 +5649,8 @@ async def botstatus(interaction: discord.Interaction):
     embed.add_field(name="Latence gateway", value=f"{gateway_ms} ms", inline=True)
     embed.add_field(name="Latence API", value=api_text, inline=True)
     embed.add_field(name="Dernier rate limit", value=rate_limit_text, inline=False)
-    embed.add_field(name="Leaderboard / FFA", value=lb_text, inline=False)
+    embed.add_field(name="Leaderboard Team", value=lb_text, inline=False)
+    embed.add_field(name="Leaderboard FFA", value=lb_text, inline=False)
     embed.add_field(name="Leaderboard 1v1 / 1v1 GAL", value=lb_1v1_text, inline=False)
     embed.add_field(name="Dernier scan victoires", value=win_scan_text, inline=False)
 
