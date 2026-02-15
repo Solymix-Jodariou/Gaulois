@@ -451,7 +451,11 @@ def build_win_embed(info):
         p.get("clientID"): p for p in info.get("players", []) if p.get("clientID")
     }
     winner_ids = get_winner_client_ids(info)
-    winner_players = [winners_by_id.get(cid) for cid in winner_ids if winners_by_id.get(cid)]
+    winner_players = [
+        winners_by_id.get(cid)
+        for cid in winner_ids
+        if winners_by_id.get(cid) and is_clan_player(winners_by_id.get(cid))
+    ]
 
     if winner_players:
         name_width = 22
@@ -459,26 +463,26 @@ def build_win_embed(info):
         def format_winner_row(player):
             username = player.get("username") or "Unknown"
             name = username if len(username) <= name_width else username[: name_width - 3] + "..."
-            marker = "★" if is_clan_player(player) else " "
-            return f"{marker} {name}"
+            return f"{name}"
 
         lines = [format_winner_row(p) for p in winner_players[:12]]
         more = len(winner_players) - len(lines)
         if more > 0:
             lines.append(f"... +{more}")
         embed.add_field(
-            name="Gagnants (★ = [GAL])",
+            name=f"Gagnants ({CLAN_DISPLAY})",
             value="```\n" + "\n".join(lines) + "\n```",
             inline=True,
         )
     elif winners:
-        shown = winners[:12]
+        gal_winners = [name for name in winners if is_clan_username(name)]
+        shown = gal_winners[:12]
         more = len(winners) - len(shown)
-        lines = [f"★ {name}" if is_clan_username(name) else f"  {name}" for name in shown]
+        lines = [name for name in shown]
         if more > 0:
             lines.append(f"... +{more}")
         embed.add_field(
-            name="Gagnants (★ = [GAL])",
+            name=f"Gagnants ({CLAN_DISPLAY})",
             value="```\n" + "\n".join(lines) + "\n```",
             inline=True,
         )
@@ -511,6 +515,41 @@ def build_win_embed(info):
         embed.set_footer(text=f"Mis � jour le {footer_time}")
 
     return embed
+
+
+def build_gal_only_winners_value(lines):
+    kept = []
+    for line in lines:
+        raw = line.strip()
+        if not raw:
+            continue
+        raw = raw.lstrip("★").strip()
+        if is_clan_username(raw):
+            kept.append(raw)
+    if not kept:
+        kept = [CLAN_DISPLAY]
+    return "```\n" + "\n".join(kept) + "\n```"
+
+
+def cleanup_win_embed(embed: discord.Embed) -> discord.Embed:
+    new_embed = embed.copy()
+    for idx, field in enumerate(new_embed.fields):
+        if field.name.startswith("Gagnants"):
+            value = field.value.strip()
+            if value.startswith("```") and value.endswith("```"):
+                content = value.strip("`").strip()
+            else:
+                content = value
+            lines = [line.rstrip() for line in content.splitlines() if line.strip()]
+            new_value = build_gal_only_winners_value(lines)
+            new_embed.set_field_at(
+                idx,
+                name=f"Gagnants ({CLAN_DISPLAY})",
+                value=new_value,
+                inline=field.inline,
+            )
+            break
+    return new_embed
 
 
 def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str):
@@ -5485,6 +5524,56 @@ async def resetwinsnotify(interaction: discord.Interaction):
         return
     await interaction.followup.send(
         "✅ Notifications réinitialisées (Team + FFA). Les prochains scans renverront les victoires dans la fenêtre.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="cleanwinnotifs", description="Nettoie les 50 dernières notifs de victoire.")
+async def cleanwinnotifs(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.guild:
+        await interaction.followup.send("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_member(interaction.user):
+        await interaction.followup.send("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+
+    channel_id = WIN_NOTIFY_CHANNEL_ID or "1467932266633367602"
+    try:
+        channel_id = int(channel_id)
+    except Exception:
+        await interaction.followup.send("ID de salon victoire invalide.", ephemeral=True)
+        return
+
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    except Exception as exc:
+        await interaction.followup.send(f"Salon victoire introuvable: {exc}", ephemeral=True)
+        return
+
+    scanned = 0
+    updated = 0
+    skipped = 0
+    async for message in channel.history(limit=50):
+        scanned += 1
+        if message.author != bot.user or not message.embeds:
+            skipped += 1
+            continue
+        embed = message.embeds[0]
+        if not embed.title or "OpenFront Game" not in embed.title:
+            skipped += 1
+            continue
+        try:
+            new_embed = cleanup_win_embed(embed)
+            await message.edit(embed=new_embed)
+            updated += 1
+            await asyncio.sleep(0.3)
+        except Exception:
+            skipped += 1
+            continue
+
+    await interaction.followup.send(
+        f"✅ Nettoyage terminé. Scannés: {scanned} | Modifiés: {updated} | Ignorés: {skipped}.",
         ephemeral=True,
     )
 
