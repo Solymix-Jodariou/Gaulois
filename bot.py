@@ -3991,6 +3991,35 @@ async def update_leaderboard_message_ffa_for_guild(guild: discord.Guild):
         return {"updated": False, "error": str(exc)[:200]}
 
 
+async def recover_ffa_leaderboard_record(guild: discord.Guild):
+    for channel in guild.text_channels:
+        if not channel.permissions_for(guild.me).read_message_history:
+            continue
+        try:
+            async for msg in channel.history(limit=30):
+                if msg.author != bot.user or not msg.embeds:
+                    continue
+                title = msg.embeds[0].title or ""
+                if "Leaderboard FFA" in title:
+                    await set_leaderboard_message_ffa(guild.id, channel.id, msg.id)
+                    return {"recovered": True, "channel_id": channel.id, "message_id": msg.id}
+        except Exception:
+            continue
+    return {"recovered": False}
+
+
+async def find_message_in_guild(guild: discord.Guild, message_id: int):
+    for channel in guild.text_channels:
+        if not channel.permissions_for(guild.me).read_message_history:
+            continue
+        try:
+            msg = await channel.fetch_message(message_id)
+            return msg, channel
+        except Exception:
+            continue
+    return None, None
+
+
 async def update_leaderboard_message_1v1():
     if not bot.guilds:
         return
@@ -4041,6 +4070,11 @@ async def resync_leaderboards(guild: discord.Guild):
     ONEV1_CACHE.clear()
     ffa_result = await refresh_ffa_stats()
     ffa_message = await update_leaderboard_message_ffa_for_guild(guild)
+    ffa_recovered = None
+    if ffa_message.get("error") == "no_record":
+        ffa_recovered = await recover_ffa_leaderboard_record(guild)
+        if ffa_recovered.get("recovered"):
+            ffa_message = await update_leaderboard_message_ffa_for_guild(guild)
     await update_leaderboard_message_1v1()
     await update_leaderboard_message_1v1_gal()
     ffa_updated = await get_latest_ffa_updated_at()
@@ -4050,6 +4084,7 @@ async def resync_leaderboards(guild: discord.Guild):
         "ffa_updated": ffa_updated,
         "onev1_cached_at": onev1_cached_at,
         "ffa_message": ffa_message,
+        "ffa_recovered": ffa_recovered,
     }
 
 
@@ -4766,16 +4801,61 @@ async def resyncleaderboards(interaction: discord.Interaction):
         onev1_text = onev1_cached_at.strftime("%Y-%m-%d %H:%M") if onev1_cached_at else "inconnue"
         ffa_msg = result.get("ffa_message") or {}
         ffa_msg_text = "OK" if ffa_msg.get("updated") else f"KO ({ffa_msg.get('error')})"
+        ffa_rec = result.get("ffa_recovered") or {}
+        rec_text = "oui" if ffa_rec.get("recovered") else "non"
         await interaction.followup.send(
             "✅ Resync terminée.\n"
             f"FFA: {ffa.get('success', 0)}/{ffa.get('total', 0)} OK, {ffa.get('failed', 0)} échecs\n"
             f"Dernière maj FFA: {ffa_updated}\n"
             f"Dernier fetch 1v1: {onev1_text}\n"
-            f"Maj message FFA: {ffa_msg_text}",
+            f"Maj message FFA: {ffa_msg_text}\n"
+            f"Record FFA récupéré: {rec_text}",
             ephemeral=True,
         )
     except Exception as exc:
         await interaction.followup.send(f"❌ Erreur resync: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="setleaderboardffaid", description="Lier un message au leaderboard FFA.")
+@app_commands.describe(message_id="ID du message leaderboard FFA")
+async def setleaderboardffaid(interaction: discord.Interaction, message_id: str):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_member(interaction.user):
+        await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+    if not message_id.isdigit():
+        await interaction.response.send_message("ID invalide.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    msg, channel = await find_message_in_guild(interaction.guild, int(message_id))
+    if not msg or not channel:
+        await interaction.followup.send("Message introuvable dans le serveur.", ephemeral=True)
+        return
+    await set_leaderboard_message_ffa(interaction.guild.id, channel.id, msg.id)
+    await interaction.followup.send("✅ Leaderboard FFA lié.", ephemeral=True)
+
+
+@bot.tree.command(name="setleaderboard1v1galid", description="Lier un message au leaderboard 1v1 [GAL].")
+@app_commands.describe(message_id="ID du message leaderboard 1v1 [GAL]")
+async def setleaderboard1v1galid(interaction: discord.Interaction, message_id: str):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_member(interaction.user):
+        await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+    if not message_id.isdigit():
+        await interaction.response.send_message("ID invalide.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    msg, channel = await find_message_in_guild(interaction.guild, int(message_id))
+    if not msg or not channel:
+        await interaction.followup.send("Message introuvable dans le serveur.", ephemeral=True)
+        return
+    await set_leaderboard_message_1v1_gal(interaction.guild.id, channel.id, msg.id)
+    await interaction.followup.send("✅ Leaderboard 1v1 [GAL] lié.", ephemeral=True)
 
 
 @bot.tree.command(name="compare", description="Comparer deux joueurs enregistrés.")
