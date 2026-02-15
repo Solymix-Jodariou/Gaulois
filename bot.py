@@ -61,6 +61,10 @@ WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = int(os.getenv("WIN_NOTIFY_EMPTY_COOLDOWN_MIN
 BOT_START_TIME = datetime.now(timezone.utc)
 LAST_HTTP_RATELIMIT_AT = None
 LAST_HTTP_RATELIMIT_PATH = None
+LAST_LB_LIVE_AT = None
+NEXT_LB_LIVE_AT = None
+LAST_LB_1V1_LIVE_AT = None
+NEXT_LB_1V1_LIVE_AT = None
 OFM_ROLE_ID = int(os.getenv("OFM_ROLE_ID", "1469695783790968963"))
 OFM_MANAGER_ROLE_ID = int(os.getenv("OFM_MANAGER_ROLE_ID", "1469701081759219723"))
 OFM_TEAM_ROLE_ID = int(os.getenv("OFM_TEAM_ROLE_ID", "1469701766223368216"))
@@ -4502,6 +4506,7 @@ async def backfill_loop():
 
 async def live_loop():
     while True:
+        loop_start = datetime.now(timezone.utc)
         try:
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(hours=RANGE_HOURS)
@@ -4512,6 +4517,10 @@ async def live_loop():
             await update_leaderboard_message_ffa()
         except Exception as exc:
             print(f"Live refresh failed: {exc}")
+        finally:
+            global LAST_LB_LIVE_AT, NEXT_LB_LIVE_AT
+            LAST_LB_LIVE_AT = loop_start
+            NEXT_LB_LIVE_AT = loop_start + timedelta(minutes=REFRESH_MINUTES)
         await asyncio.sleep(REFRESH_MINUTES * 60)
 
 
@@ -4561,6 +4570,7 @@ async def backfill_1v1_loop():
 
 async def live_1v1_loop():
     while True:
+        loop_start = datetime.now(timezone.utc)
         try:
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(hours=48)
@@ -4569,6 +4579,10 @@ async def live_1v1_loop():
             await update_leaderboard_message_1v1_gal()
         except Exception as exc:
             print(f"Live 1v1 refresh failed: {exc}")
+        finally:
+            global LAST_LB_1V1_LIVE_AT, NEXT_LB_1V1_LIVE_AT
+            LAST_LB_1V1_LIVE_AT = loop_start
+            NEXT_LB_1V1_LIVE_AT = loop_start + timedelta(minutes=ONEV1_REFRESH_MINUTES)
         await asyncio.sleep(ONEV1_REFRESH_MINUTES * 60)
 
 
@@ -5600,6 +5614,20 @@ async def botstatus(interaction: discord.Interaction):
         path = LAST_HTTP_RATELIMIT_PATH or "?"
         rate_limit_text = f"Oui (il y a {age}) {path}"
 
+    lb_text = "Inconnu"
+    if LAST_LB_LIVE_AT:
+        lb_text = f"Dernière: {format_local_time(LAST_LB_LIVE_AT)}"
+    if NEXT_LB_LIVE_AT:
+        in_text = format_uptime(NEXT_LB_LIVE_AT - now) if NEXT_LB_LIVE_AT > now else "en retard"
+        lb_text += f"\nProchaine: {format_local_time(NEXT_LB_LIVE_AT)} ({in_text})"
+
+    lb_1v1_text = "Inconnu"
+    if LAST_LB_1V1_LIVE_AT:
+        lb_1v1_text = f"Dernière: {format_local_time(LAST_LB_1V1_LIVE_AT)}"
+    if NEXT_LB_1V1_LIVE_AT:
+        in_text = format_uptime(NEXT_LB_1V1_LIVE_AT - now) if NEXT_LB_1V1_LIVE_AT > now else "en retard"
+        lb_1v1_text += f"\nProchaine: {format_local_time(NEXT_LB_1V1_LIVE_AT)} ({in_text})"
+
     stats = await get_last_win_notify_stats()
     win_scan_text = "Aucun"
     if stats and stats.get("last_scan_at"):
@@ -5621,6 +5649,8 @@ async def botstatus(interaction: discord.Interaction):
     embed.add_field(name="Latence gateway", value=f"{gateway_ms} ms", inline=True)
     embed.add_field(name="Latence API", value=api_text, inline=True)
     embed.add_field(name="Dernier rate limit", value=rate_limit_text, inline=False)
+    embed.add_field(name="Leaderboard / FFA", value=lb_text, inline=False)
+    embed.add_field(name="Leaderboard 1v1 / 1v1 GAL", value=lb_1v1_text, inline=False)
     embed.add_field(name="Dernier scan victoires", value=win_scan_text, inline=False)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
