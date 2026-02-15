@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import re
 from io import BytesIO
@@ -57,6 +58,9 @@ WIN_NOTIFY_CHANNEL_ID = os.getenv("WIN_NOTIFY_CHANNEL_ID")
 WIN_NOTIFY_POLL_SECONDS = int(os.getenv("WIN_NOTIFY_POLL_SECONDS", "300"))
 WIN_NOTIFY_RANGE_HOURS = int(os.getenv("WIN_NOTIFY_RANGE_HOURS", "24"))
 WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES = int(os.getenv("WIN_NOTIFY_EMPTY_COOLDOWN_MINUTES", "60"))
+BOT_START_TIME = datetime.now(timezone.utc)
+LAST_HTTP_RATELIMIT_AT = None
+LAST_HTTP_RATELIMIT_PATH = None
 OFM_ROLE_ID = int(os.getenv("OFM_ROLE_ID", "1469695783790968963"))
 OFM_MANAGER_ROLE_ID = int(os.getenv("OFM_MANAGER_ROLE_ID", "1469701081759219723"))
 OFM_TEAM_ROLE_ID = int(os.getenv("OFM_TEAM_ROLE_ID", "1469701766223368216"))
@@ -203,6 +207,22 @@ def format_duration(seconds: Optional[int]) -> str:
         return f"{seconds // 60}m"
     return f"{seconds}s"
 
+
+def format_uptime(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}j")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
 
 def is_admin_user_id(user_id: int) -> bool:
     return user_id in {FOUNDER_USER_ID, ADMIN_USER_ID}
@@ -4789,6 +4809,16 @@ async def on_ready():
     print(f"Bot connected: {bot.user}")
 
 
+@bot.event
+async def on_http_ratelimit(data):
+    global LAST_HTTP_RATELIMIT_AT, LAST_HTTP_RATELIMIT_PATH
+    LAST_HTTP_RATELIMIT_AT = datetime.now(timezone.utc)
+    if isinstance(data, dict):
+        LAST_HTTP_RATELIMIT_PATH = data.get("path")
+    else:
+        LAST_HTTP_RATELIMIT_PATH = None
+
+
 @bot.tree.command(name="inscriptionofm", description="Inscription tournoi OFM.")
 async def inscription_ofm(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -5529,6 +5559,71 @@ async def winscanstatus(interaction: discord.Interaction):
     if stats.get("error"):
         message += f"\nErreur: {stats['error']}"
     await interaction.followup.send(message, ephemeral=True)
+
+
+@bot.tree.command(name="botstatus", description="Etat du bot (latence, rate limit, scans).")
+async def botstatus(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.guild:
+        await interaction.followup.send("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_member(interaction.user):
+        await interaction.followup.send("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+
+    now = datetime.now(timezone.utc)
+    uptime = format_uptime(now - BOT_START_TIME)
+    gateway_ms = int(bot.latency * 1000)
+
+    api_latency_ms = None
+    api_status = "OK"
+    try:
+        start = time.monotonic()
+        await bot.fetch_user(bot.user.id)
+        api_latency_ms = int((time.monotonic() - start) * 1000)
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            api_status = "Rate limited"
+        else:
+            api_status = f"HTTP {exc.status}"
+    except Exception:
+        api_status = "Erreur"
+
+    if api_latency_ms is not None:
+        api_text = f"{api_latency_ms} ms"
+    else:
+        api_text = api_status
+
+    rate_limit_text = "Aucun"
+    if LAST_HTTP_RATELIMIT_AT:
+        age = format_uptime(now - LAST_HTTP_RATELIMIT_AT)
+        path = LAST_HTTP_RATELIMIT_PATH or "?"
+        rate_limit_text = f"Oui (il y a {age}) {path}"
+
+    stats = await get_last_win_notify_stats()
+    win_scan_text = "Aucun"
+    if stats and stats.get("last_scan_at"):
+        last_scan_at = stats["last_scan_at"]
+        win_scan_text = str(last_scan_at)
+        try:
+            last_dt = datetime.strptime(last_scan_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            age = format_uptime(now - last_dt)
+            win_scan_text = f"{last_scan_at} (il y a {age})"
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        title="Etat du bot",
+        description=f"Serveur: {interaction.guild.name}\nHeure locale: {format_local_time(now)}",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Uptime", value=uptime, inline=True)
+    embed.add_field(name="Latence gateway", value=f"{gateway_ms} ms", inline=True)
+    embed.add_field(name="Latence API", value=api_text, inline=True)
+    embed.add_field(name="Dernier rate limit", value=rate_limit_text, inline=False)
+    embed.add_field(name="Dernier scan victoires", value=win_scan_text, inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="resetwinsnotify", description="Réinitialise les victoires déjà notifiées.")
