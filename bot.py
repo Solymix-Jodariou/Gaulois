@@ -1549,13 +1549,18 @@ async def load_ffa_leaderboard():
 
 async def refresh_ffa_stats():
     players = await get_ffa_players()
+    success = 0
+    failed = 0
     for _discord_id, pseudo, player_id in players:
         try:
             sessions = await fetch_player_sessions(player_id)
             wins, losses = compute_ffa_stats_from_sessions(sessions)
             await upsert_ffa_stats(player_id, pseudo, wins, losses)
+            success += 1
         except Exception:
+            failed += 1
             continue
+    return {"total": len(players), "success": success, "failed": failed}
 
 
 async def build_leaderboard_ffa_embed(guild, page: int, page_size: int):
@@ -4006,12 +4011,27 @@ async def update_leaderboard_message_1v1_gal():
             await clear_leaderboard_message_1v1_gal(guild.id)
 
 
+async def get_latest_ffa_updated_at():
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT MAX(updated_at) AS last_updated FROM ffa_stats"
+        )
+        return row["last_updated"] if row else None
+
+
 async def resync_leaderboards(guild: discord.Guild):
     ONEV1_CACHE.clear()
-    await refresh_ffa_stats()
+    ffa_result = await refresh_ffa_stats()
     await update_leaderboard_message_ffa()
     await update_leaderboard_message_1v1()
     await update_leaderboard_message_1v1_gal()
+    ffa_updated = await get_latest_ffa_updated_at()
+    onev1_cached_at = ONEV1_CACHE.get("fetched_at")
+    return {
+        "ffa": ffa_result,
+        "ffa_updated": ffa_updated,
+        "onev1_cached_at": onev1_cached_at,
+    }
 
 
 async def get_progress_stats():
@@ -4720,8 +4740,18 @@ async def resyncleaderboards(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     try:
-        await resync_leaderboards(interaction.guild)
-        await interaction.followup.send("✅ Resync terminée.", ephemeral=True)
+        result = await resync_leaderboards(interaction.guild)
+        ffa = result.get("ffa") or {}
+        ffa_updated = result.get("ffa_updated") or "inconnue"
+        onev1_cached_at = result.get("onev1_cached_at")
+        onev1_text = onev1_cached_at.strftime("%Y-%m-%d %H:%M") if onev1_cached_at else "inconnue"
+        await interaction.followup.send(
+            "✅ Resync terminée.\n"
+            f"FFA: {ffa.get('success', 0)}/{ffa.get('total', 0)} OK, {ffa.get('failed', 0)} échecs\n"
+            f"Dernière maj FFA: {ffa_updated}\n"
+            f"Dernier fetch 1v1: {onev1_text}",
+            ephemeral=True,
+        )
     except Exception as exc:
         await interaction.followup.send(f"❌ Erreur resync: {exc}", ephemeral=True)
 
