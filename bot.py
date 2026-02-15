@@ -4006,6 +4006,14 @@ async def update_leaderboard_message_1v1_gal():
             await clear_leaderboard_message_1v1_gal(guild.id)
 
 
+async def resync_leaderboards(guild: discord.Guild):
+    ONEV1_CACHE.clear()
+    await refresh_ffa_stats()
+    await update_leaderboard_message_ffa()
+    await update_leaderboard_message_1v1()
+    await update_leaderboard_message_1v1_gal()
+
+
 async def get_progress_stats():
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -4700,6 +4708,22 @@ async def setadminpanel(interaction: discord.Interaction):
         await interaction.followup.send("✅ Panel admin mis à jour.", ephemeral=True)
     except Exception as exc:
         await interaction.followup.send(f"❌ Erreur panel admin: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="resyncleaderboards", description="Force la resync des leaderboards.")
+async def resyncleaderboards(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_member(interaction.user):
+        await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await resync_leaderboards(interaction.guild)
+        await interaction.followup.send("✅ Resync terminée.", ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"❌ Erreur resync: {exc}", ephemeral=True)
 
 
 @bot.tree.command(name="compare", description="Comparer deux joueurs enregistrés.")
