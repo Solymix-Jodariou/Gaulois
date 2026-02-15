@@ -3954,6 +3954,24 @@ async def update_leaderboard_message():
             await clear_leaderboard_message(guild.id)
 
 
+async def update_leaderboard_message_for_guild(guild: discord.Guild):
+    record = await get_leaderboard_message(guild.id)
+    if not record:
+        return {"updated": False, "error": "no_record"}
+    channel_id = record["channel_id"]
+    message_id = record["message_id"]
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        embed = await build_leaderboard_embed(guild, 1, 20)
+        if not embed:
+            return {"updated": False, "error": "no_embed"}
+        await message.edit(embed=embed, view=LeaderboardView(1, 20))
+        return {"updated": True, "error": None}
+    except Exception as exc:
+        return {"updated": False, "error": str(exc)[:200]}
+
+
 async def update_leaderboard_message_ffa():
     if not bot.guilds:
         return
@@ -4070,6 +4088,7 @@ async def resync_leaderboards(guild: discord.Guild):
     ONEV1_CACHE.clear()
     ffa_result = await refresh_ffa_stats()
     ffa_message = await update_leaderboard_message_ffa_for_guild(guild)
+    main_message = await update_leaderboard_message_for_guild(guild)
     ffa_recovered = None
     if ffa_message.get("error") == "no_record":
         ffa_recovered = await recover_ffa_leaderboard_record(guild)
@@ -4085,6 +4104,7 @@ async def resync_leaderboards(guild: discord.Guild):
         "onev1_cached_at": onev1_cached_at,
         "ffa_message": ffa_message,
         "ffa_recovered": ffa_recovered,
+        "main_message": main_message,
     }
 
 
@@ -4803,13 +4823,16 @@ async def resyncleaderboards(interaction: discord.Interaction):
         ffa_msg_text = "OK" if ffa_msg.get("updated") else f"KO ({ffa_msg.get('error')})"
         ffa_rec = result.get("ffa_recovered") or {}
         rec_text = "oui" if ffa_rec.get("recovered") else "non"
+        main_msg = result.get("main_message") or {}
+        main_msg_text = "OK" if main_msg.get("updated") else f"KO ({main_msg.get('error')})"
         await interaction.followup.send(
             "✅ Resync terminée.\n"
             f"FFA: {ffa.get('success', 0)}/{ffa.get('total', 0)} OK, {ffa.get('failed', 0)} échecs\n"
             f"Dernière maj FFA: {ffa_updated}\n"
             f"Dernier fetch 1v1: {onev1_text}\n"
             f"Maj message FFA: {ffa_msg_text}\n"
-            f"Record FFA récupéré: {rec_text}",
+            f"Record FFA récupéré: {rec_text}\n"
+            f"Maj message principal: {main_msg_text}",
             ephemeral=True,
         )
     except Exception as exc:
