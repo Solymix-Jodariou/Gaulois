@@ -33,7 +33,7 @@ USER_AGENT = "Mozilla/5.0 (GauloisBot/1.1)"
 OPENFRONT_API_KEY = os.getenv("OPENFRONT_API_KEY")
 OPENFRONT_GAME_URL_TEMPLATE = os.getenv(
     "OPENFRONT_GAME_URL_TEMPLATE",
-    "https://openfront.io/#/game/{game_id}",
+    "https://openfront.io/w3/game/{game_id}?live",
 )
 ONEV1_LEADERBOARD_URL = os.getenv(
     "OPENFRONT_1V1_LEADERBOARD_URL",
@@ -531,6 +531,25 @@ def build_gal_only_winners_value(lines):
     return "```\n" + "\n".join(kept) + "\n```"
 
 
+def update_win_embed_url(embed: discord.Embed) -> discord.Embed:
+    new_embed = embed.copy()
+    game_id = None
+    title = new_embed.title or ""
+    match = re.search(r"OpenFront Game\\s+([A-Za-z0-9_-]+)", title)
+    if match:
+        game_id = match.group(1)
+    elif new_embed.url:
+        url_match = re.search(r"/game/([A-Za-z0-9_-]+)", new_embed.url)
+        if url_match:
+            game_id = url_match.group(1)
+    if game_id:
+        try:
+            new_embed.url = OPENFRONT_GAME_URL_TEMPLATE.format(game_id=game_id)
+        except Exception:
+            pass
+    return new_embed
+
+
 def cleanup_win_embed(embed: discord.Embed) -> discord.Embed:
     new_embed = embed.copy()
     for idx, field in enumerate(new_embed.fields):
@@ -549,7 +568,7 @@ def cleanup_win_embed(embed: discord.Embed) -> discord.Embed:
                 inline=field.inline,
             )
             break
-    return new_embed
+    return update_win_embed_url(new_embed)
 
 
 def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str):
