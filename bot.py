@@ -4837,6 +4837,27 @@ async def setleaderboardffaid(interaction: discord.Interaction, message_id: str)
     await interaction.followup.send("✅ Leaderboard FFA lié.", ephemeral=True)
 
 
+@bot.tree.command(name="setleaderboardid", description="Lier un message au leaderboard principal.")
+@app_commands.describe(message_id="ID du message leaderboard")
+async def setleaderboardid(interaction: discord.Interaction, message_id: str):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande disponible uniquement sur un serveur.", ephemeral=True)
+        return
+    if not is_admin_member(interaction.user):
+        await interaction.response.send_message("Accès réservé fondateur/admin.", ephemeral=True)
+        return
+    if not message_id.isdigit():
+        await interaction.response.send_message("ID invalide.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    msg, channel = await find_message_in_guild(interaction.guild, int(message_id))
+    if not msg or not channel:
+        await interaction.followup.send("Message introuvable dans le serveur.", ephemeral=True)
+        return
+    await set_leaderboard_message(interaction.guild.id, channel.id, msg.id)
+    await interaction.followup.send("✅ Leaderboard principal lié.", ephemeral=True)
+
+
 @bot.tree.command(name="setleaderboard1v1galid", description="Lier un message au leaderboard 1v1 [GAL].")
 @app_commands.describe(message_id="ID du message leaderboard 1v1 [GAL]")
 async def setleaderboard1v1galid(interaction: discord.Interaction, message_id: str):
