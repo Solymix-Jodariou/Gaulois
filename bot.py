@@ -599,6 +599,12 @@ def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str
     mode = session.get("gameMode") or session.get("mode") or "FFA"
     end_raw = session.get("end") or session.get("endTime")
     start_raw = session.get("start") or session.get("startTime")
+    map_name = (
+        session.get("mapName")
+        or session.get("map")
+        or session.get("mapTitle")
+        or session.get("mapId")
+    )
 
     game_url = None
     if game_id:
@@ -615,7 +621,12 @@ def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str
         color=discord.Color.orange(),
     )
     embed.add_field(name="Player ID", value=str(player_id), inline=True)
+    embed.add_field(name="Game ID", value=str(game_id), inline=True)
+    if map_name:
+        embed.add_field(name="Map", value=str(map_name), inline=True)
     embed.add_field(name="Mode", value=str(mode), inline=True)
+    if game_url:
+        embed.add_field(name="Lien", value=f"[Ouvrir la partie]({game_url})", inline=False)
 
     footer_time = None
     if end_raw:
@@ -4675,9 +4686,6 @@ async def win_notify_loop():
                             stats["skipped_notified"] += 1
                             continue
                         stats["wins_ffa"] += 1
-                        if bootstrap:
-                            await mark_ffa_win_notified(player_id, game_id)
-                            continue
                         embed = build_ffa_win_embed(pseudo, player_id, ps, game_id)
                         await channel.send(embed=embed)
                         await mark_ffa_win_notified(player_id, game_id)
