@@ -1401,6 +1401,14 @@ async def get_ffa_player(discord_id: int):
         )
 
 
+async def get_ffa_player_by_player_id(player_id: str):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT discord_id, pseudo, player_id FROM ffa_players WHERE player_id = $1",
+            player_id,
+        )
+
+
 async def delete_ffa_player(discord_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -5523,8 +5531,96 @@ async def removeleaderboard1v1gal(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="checkwinsgal", description="Force un check des victoires [GAL].")
-async def checkwinsgal(interaction: discord.Interaction):
+@app_commands.describe(
+    player_id="OpenFront player ID (optionnel)",
+    game_id="ID de la game OpenFront (optionnel)",
+    force="Envoyer même si déjà notifiée",
+)
+async def checkwinsgal(
+    interaction: discord.Interaction,
+    player_id: Optional[str] = None,
+    game_id: Optional[str] = None,
+    force: bool = False,
+):
     await interaction.response.defer(ephemeral=True)
+
+    if player_id or game_id:
+        if not interaction.guild:
+            await interaction.followup.send("Commande disponible uniquement sur un serveur.", ephemeral=True)
+            return
+        if not is_admin_member(interaction.user):
+            await interaction.followup.send("Accès réservé fondateur/admin.", ephemeral=True)
+            return
+        if not player_id or not game_id:
+            await interaction.followup.send("Il faut player_id ET game_id.", ephemeral=True)
+            return
+        if not WIN_NOTIFY_CHANNEL_ID:
+            await interaction.followup.send("WIN_NOTIFY_CHANNEL_ID manquant.", ephemeral=True)
+            return
+
+        try:
+            channel = bot.get_channel(int(WIN_NOTIFY_CHANNEL_ID)) or await bot.fetch_channel(
+                int(WIN_NOTIFY_CHANNEL_ID)
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"Salon victoire introuvable: {exc}", ephemeral=True)
+            return
+
+        channel_error = get_notify_channel_error(channel)
+        if channel_error:
+            await interaction.followup.send(f"Salon victoire invalide: {channel_error}", ephemeral=True)
+            return
+
+        record = await get_ffa_player_by_player_id(player_id)
+        pseudo = record["pseudo"] if record else player_id
+
+        try:
+            sessions = await fetch_player_sessions(player_id)
+        except Exception as exc:
+            await interaction.followup.send(f"Erreur API sessions: {exc}", ephemeral=True)
+            return
+
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(hours=WIN_NOTIFY_RANGE_HOURS)
+
+        target = None
+        for ps in sessions:
+            if get_session_game_id(ps) == game_id:
+                target = ps
+                break
+        if not target:
+            await interaction.followup.send("Game introuvable dans les sessions FFA du joueur.", ephemeral=True)
+            return
+
+        session_time = get_session_time(target)
+        if not session_time or session_time < start_dt or session_time > end_dt:
+            await interaction.followup.send(
+                f"Hors fenêtre des {WIN_NOTIFY_RANGE_HOURS}h.",
+                ephemeral=True,
+            )
+            return
+
+        if not is_ffa_session(target):
+            await interaction.followup.send("Cette partie n'est pas une FFA.", ephemeral=True)
+            return
+        if not target.get("hasWon"):
+            await interaction.followup.send("Cette partie n'est pas une victoire.", ephemeral=True)
+            return
+
+        already = await is_ffa_win_notified(player_id, game_id)
+        if already and not force:
+            await interaction.followup.send(
+                "Déjà notifiée. Utilise force=True si tu veux la renvoyer.",
+                ephemeral=True,
+            )
+            return
+
+        embed = build_ffa_win_embed(pseudo, player_id, target, game_id)
+        await channel.send(embed=embed)
+        await mark_ffa_win_notified(player_id, game_id)
+        await interaction.followup.send("✅ Notif FFA envoyée.", ephemeral=True)
+        return
+
     try:
         result = await run_win_notify_once(force_empty=True)
     except Exception as exc:
@@ -5573,6 +5669,8 @@ async def winscanstatus(interaction: discord.Interaction):
     if stats.get("error"):
         message += f"\nErreur: {stats['error']}"
     await interaction.followup.send(message, ephemeral=True)
+
+
 
 
 @bot.tree.command(name="botstatus", description="Etat du bot (latence, rate limit, scans).")
