@@ -5593,12 +5593,13 @@ async def checkwinsgal(
             return
 
         session_time = get_session_time(target)
-        if not session_time or session_time < start_dt or session_time > end_dt:
-            await interaction.followup.send(
-                f"Hors fenêtre des {WIN_NOTIFY_RANGE_HOURS}h.",
-                ephemeral=True,
-            )
-            return
+        if not force:
+            if not session_time or session_time < start_dt or session_time > end_dt:
+                await interaction.followup.send(
+                    f"Hors fenêtre des {WIN_NOTIFY_RANGE_HOURS}h.",
+                    ephemeral=True,
+                )
+                return
 
         if not is_ffa_session(target):
             await interaction.followup.send("Cette partie n'est pas une FFA.", ephemeral=True)
