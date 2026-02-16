@@ -5,7 +5,14 @@ from datetime import datetime, timezone, timedelta
 
 import discord
 
-from parametres import ADMIN_USER_ID, FOUNDER_USER_ID, SCORE_GAMES_WEIGHT, SCORE_RATIO_WEIGHT
+from parametres import (
+    ADMIN_USER_ID,
+    CLAN_DISPLAY,
+    CLAN_TAG,
+    FOUNDER_USER_ID,
+    SCORE_GAMES_WEIGHT,
+    SCORE_RATIO_WEIGHT,
+)
 
 
 def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):
@@ -119,3 +126,36 @@ def is_admin_member(member: discord.Member) -> bool:
         return True
     role_ids = {role.id for role in member.roles}
     return bool(role_ids.intersection({FOUNDER_USER_ID, ADMIN_USER_ID}))
+
+
+def is_clan_username(username: str) -> bool:
+    if not username:
+        return False
+    upper = username.upper()
+    tag = CLAN_TAG.upper()
+    return f"[{tag}]" in upper or upper.startswith(f"{tag} ")
+
+
+def is_clan_player(player: dict) -> bool:
+    tag = player.get("clanTag")
+    if tag and str(tag).upper() == CLAN_TAG.upper():
+        return True
+    return is_clan_username(player.get("username") or "")
+
+
+def game_mode(info):
+    return (info.get("config", {}) or {}).get("gameMode") or ""
+
+
+def get_winner_client_ids(info):
+    winner = info.get("winner")
+    if not winner or not isinstance(winner, list) or len(winner) < 3:
+        return set()
+    winners = winner[2]
+    if isinstance(winners, list):
+        return set(winners)
+    # Format observed: ["team", "Purple", "id1", "id2", ...]
+    tail = winner[2:]
+    if all(isinstance(x, str) for x in tail):
+        return set(tail)
+    return set()
