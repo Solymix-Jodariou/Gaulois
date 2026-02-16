@@ -595,7 +595,7 @@ def cleanup_win_embed(embed: discord.Embed) -> discord.Embed:
     return update_win_embed_url(new_embed)
 
 
-def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str):
+def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str, discord_id: Optional[int] = None):
     mode = session.get("gameMode") or session.get("mode") or "FFA"
     end_raw = session.get("end") or session.get("endTime")
     start_raw = session.get("start") or session.get("startTime")
@@ -625,6 +625,8 @@ def build_ffa_win_embed(pseudo: str, player_id: str, session: dict, game_id: str
     if map_name:
         embed.add_field(name="Map", value=str(map_name), inline=True)
     embed.add_field(name="Mode", value=str(mode), inline=True)
+    if discord_id:
+        embed.add_field(name="Joueur", value=f"<@{discord_id}>", inline=True)
     if game_url:
         embed.add_field(name="Lien", value=f"[Ouvrir la partie]({game_url})", inline=False)
 
@@ -4662,7 +4664,7 @@ async def win_notify_loop():
                     stats["sent_team"] += 1
 
                 ffa_players = await get_ffa_players()
-                for _discord_id, pseudo, player_id in ffa_players:
+                for discord_id, pseudo, player_id in ffa_players:
                     try:
                         player_sessions = await fetch_player_sessions(player_id)
                     except Exception:
@@ -4686,7 +4688,7 @@ async def win_notify_loop():
                             stats["skipped_notified"] += 1
                             continue
                         stats["wins_ffa"] += 1
-                        embed = build_ffa_win_embed(pseudo, player_id, ps, game_id)
+                        embed = build_ffa_win_embed(pseudo, player_id, ps, game_id, discord_id)
                         await channel.send(embed=embed)
                         await mark_ffa_win_notified(player_id, game_id)
                         stats["sent_ffa"] += 1
@@ -4760,7 +4762,7 @@ async def run_win_notify_once(force_empty: bool = False):
             stats["sent_team"] += 1
 
         ffa_players = await get_ffa_players()
-        for _discord_id, pseudo, player_id in ffa_players:
+        for discord_id, pseudo, player_id in ffa_players:
             try:
                 player_sessions = await fetch_player_sessions(player_id)
             except Exception:
@@ -4784,7 +4786,7 @@ async def run_win_notify_once(force_empty: bool = False):
                     stats["skipped_notified"] += 1
                     continue
                 stats["wins_ffa"] += 1
-                embed = build_ffa_win_embed(pseudo, player_id, ps, game_id)
+                embed = build_ffa_win_embed(pseudo, player_id, ps, game_id, discord_id)
                 await channel.send(embed=embed)
                 await mark_ffa_win_notified(player_id, game_id)
                 notified_any = True
@@ -5624,7 +5626,7 @@ async def checkwinsgal(
             )
             return
 
-        embed = build_ffa_win_embed(pseudo, player_id, target, game_id)
+        embed = build_ffa_win_embed(pseudo, player_id, target, game_id, record["discord_id"] if record else None)
         await channel.send(embed=embed)
         await mark_ffa_win_notified(player_id, game_id)
         await interaction.followup.send("✅ Notif FFA envoyée.", ephemeral=True)
