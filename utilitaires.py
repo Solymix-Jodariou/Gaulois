@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 import discord
 
-from settings import ADMIN_USER_ID, FOUNDER_USER_ID, SCORE_GAMES_WEIGHT, SCORE_RATIO_WEIGHT
+from parametres import ADMIN_USER_ID, FOUNDER_USER_ID, SCORE_GAMES_WEIGHT, SCORE_RATIO_WEIGHT
 
 
 def calculate_ratio(wins_ffa, losses_ffa, wins_team, losses_team):

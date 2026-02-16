@@ -13,8 +13,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from settings import *  # noqa: F403
-from utils import *  # noqa: F403
+from parametres import *  # noqa: F403
+from utilitaires import *  # noqa: F403
 
 BOT_START_TIME = datetime.now(timezone.utc)
 LAST_HTTP_RATELIMIT_AT = None
